@@ -134,9 +134,21 @@ NTSTATUS CoreIoctlDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         s = HandlePushWatchlist(buf, inLen, outLen, &written);
         break;
     case IOCTL_AC_PUSH_MATCH:
+        if (!buf || inLen == 0) { s = STATUS_INVALID_PARAMETER; break; }
+        s = ChannelAcceptBlob(CHANNEL_BLOB_MATCH, buf, inLen);
+        break;
     case IOCTL_AC_PUSH_PROCESS_PATH:
+        if (!buf || inLen == 0) { s = STATUS_INVALID_PARAMETER; break; }
+        s = ChannelAcceptBlob(CHANNEL_BLOB_PROCESS, buf, inLen);
+        break;
     case IOCTL_AC_PUSH_VENDOR_CN:
+        if (!buf || inLen == 0) { s = STATUS_INVALID_PARAMETER; break; }
+        s = ChannelAcceptBlob(CHANNEL_BLOB_VENDOR, buf, inLen);
+        break;
     case IOCTL_AC_PUSH_USB_DEVICE:
+        if (!buf || inLen == 0) { s = STATUS_INVALID_PARAMETER; break; }
+        s = ChannelAcceptBlob(CHANNEL_BLOB_USB, buf, inLen);
+        break;
     case IOCTL_AC_PUSH_U64_SET:
     case IOCTL_AC_PUSH_CMD:
     case IOCTL_AC_DRIVER_EVENT:

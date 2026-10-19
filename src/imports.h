@@ -52,6 +52,44 @@ typedef struct _SYSTEM_MODULE_INFORMATION
 #define CORE_SysKernelDebuggerInformation   0x23
 #define CORE_SysModuleInformation           0x0B
 #define CORE_SysFirmwareTableInformation    0x4C
+#define CORE_SysBigPoolInformation          0x42
+
+typedef struct _CORE_SYSTEM_BIG_POOL_ENTRY
+{
+    union
+    {
+        PVOID       VirtualAddress;
+        ULONG_PTR   NonPagedBit;
+    };
+    ULONG_PTR SizeInBytes;
+    union
+    {
+        UCHAR Tag[4];
+        ULONG TagULong;
+    };
+} CORE_SYSTEM_BIG_POOL_ENTRY, *PCORE_SYSTEM_BIG_POOL_ENTRY;
+
+typedef struct _CORE_SYSTEM_BIG_POOL_INFORMATION
+{
+    ULONG Count;
+    CORE_SYSTEM_BIG_POOL_ENTRY AllocatedInfo[1];
+} CORE_SYSTEM_BIG_POOL_INFORMATION, *PCORE_SYSTEM_BIG_POOL_INFORMATION;
+
+#ifndef PS_IMAGE_NOTIFY_CONFLICTING_ARCHITECTURE
+#define PS_IMAGE_NOTIFY_CONFLICTING_ARCHITECTURE  0x00000001
+#endif
+
+NTKERNELAPI NTSTATUS NTAPI ObReferenceObjectByName(
+    PUNICODE_STRING    ObjectName,
+    ULONG              Attributes,
+    PACCESS_STATE      AccessState,
+    ACCESS_MASK        DesiredAccess,
+    POBJECT_TYPE       ObjectType,
+    KPROCESSOR_MODE    AccessMode,
+    PVOID              ParseContext,
+    PVOID              *Object);
+
+extern POBJECT_TYPE *IoDriverObjectType;
 
 typedef struct _SYSTEM_KERNEL_DEBUGGER_INFORMATION
 {

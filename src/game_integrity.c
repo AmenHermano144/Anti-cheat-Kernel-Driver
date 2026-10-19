@@ -3,11 +3,21 @@
 #include "channels.h"
 #include "wire_records.h"
 #include "strings.h"
+#include "events.h"
+#include "pml4_scan.h"
+
+typedef NTSTATUS (NTAPI *CI_VALIDATE_FILE_OBJECT_FN)(
+    PFILE_OBJECT FileObject,
+    ULONG Arg2,
+    ULONG Arg3,
+    PVOID Arg4,
+    PVOID Arg5,
+    PVOID Arg6,
+    PVOID Arg7);
 
 typedef struct _CI_VALIDATE_FILE_OBJECT_SIG
 {
-    NTSTATUS (NTAPI *CiValidateFileObject)(PFILE_OBJECT FileObject, ULONG a2, ULONG a3,
-                                           PVOID a4, PVOID a5, PVOID a6, PVOID a7);
+    CI_VALIDATE_FILE_OBJECT_FN CiValidateFileObject;
 } CI_VALIDATE_FILE_OBJECT_SIG, *PCI_VALIDATE_FILE_OBJECT_SIG;
 
 static CI_VALIDATE_FILE_OBJECT_SIG g_CiShim;
@@ -17,9 +27,7 @@ NTSTATUS GameIntegrityInit(VOID)
     RtlZeroMemory(&g_CiShim, sizeof(g_CiShim));
     UNICODE_STRING name;
     RtlInitUnicodeString(&name, L"CiValidateFileObject");
-    g_CiShim.CiValidateFileObject =
-        (NTSTATUS (NTAPI *)(PFILE_OBJECT, ULONG, ULONG, PVOID, PVOID, PVOID, PVOID))
-        MmGetSystemRoutineAddress(&name);
+    g_CiShim.CiValidateFileObject = (CI_VALIDATE_FILE_OBJECT_FN)MmGetSystemRoutineAddress(&name);
     return STATUS_SUCCESS;
 }
 
@@ -47,6 +55,13 @@ BOOLEAN GameIntegrityVerifyPeHeader(const UCHAR *imageBase, SIZE_T imageSize)
     }
 }
 
+static BOOLEAN PathMatchesWatchedProcess(PUNICODE_STRING fullImageName)
+{
+    if (!fullImageName || !fullImageName->Buffer) return FALSE;
+    SIZE_T wlen = fullImageName->Length / sizeof(WCHAR);
+    return ChannelBlobEqualsW(CHANNEL_BLOB_PROCESS, fullImageName->Buffer, wlen);
+}
+
 NTSTATUS GameIntegrityOnUserImageLoad(HANDLE ProcessId, PUNICODE_STRING FullImageName, PIMAGE_INFO ImageInfo)
 {
     if (!FullImageName || !ImageInfo) return STATUS_SUCCESS;
@@ -62,6 +77,34 @@ NTSTATUS GameIntegrityOnUserImageLoad(HANDLE ProcessId, PUNICODE_STRING FullImag
     if (nb > sizeof(rec.ImagePath)) nb = sizeof(rec.ImagePath);
     rec.ImagePathLen = nb;
     RtlCopyMemory(rec.ImagePath, FullImageName->Buffer, nb);
+    (VOID)ChannelEnqueueRecord(WIRE_REC_IMAGE_LOAD, &rec, sizeof(rec));
 
-    return ChannelEnqueueRecord(WIRE_REC_IMAGE_LOAD, &rec, sizeof(rec));
+    if (ImageInfo->ExtendedInfoPresent && g_CiShim.CiValidateFileObject)
+    {
+        PIMAGE_INFO_EX ex = CONTAINING_RECORD(ImageInfo, IMAGE_INFO_EX, ImageInfo);
+        if (ex->FileObject)
+        {
+            NTSTATUS vs = STATUS_SUCCESS;
+            __try
+            {
+                vs = g_CiShim.CiValidateFileObject(ex->FileObject, 0, 0, NULL, NULL, NULL, NULL);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                vs = GetExceptionCode();
+            }
+            if (!NT_SUCCESS(vs))
+            {
+                (VOID)EventsReportSignatureReject(ProcessId, (ULONG64)ImageInfo->ImageBase,
+                                                  vs, FullImageName->Buffer, nb);
+            }
+        }
+    }
+
+    if (PathMatchesWatchedProcess(FullImageName))
+    {
+        (VOID)Pml4RegisterGameProcessByPid(ProcessId);
+    }
+
+    return STATUS_SUCCESS;
 }

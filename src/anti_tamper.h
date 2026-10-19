@@ -20,3 +20,6 @@ BOOLEAN  AcTamperDrainNmiFlags(ULONG *outReason, ULONG64 *outObserved);
 #define AC_TAMPER_REASON_STACK          0x1002
 #define AC_TAMPER_REASON_DEBUGCTL       0x1003
 #define AC_TAMPER_REASON_NMI_SKEW       0x1004
+#define AC_TAMPER_REASON_PIDDB          0x1005
+#define AC_TAMPER_REASON_MMUNLOADED     0x1006
+#define AC_TAMPER_REASON_INPUT          0x1007

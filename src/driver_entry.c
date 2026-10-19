@@ -12,6 +12,9 @@
 #include "pml4_scan.h"
 #include "hwid.h"
 #include "game_integrity.h"
+#include "exec_region_scan.h"
+#include "input_integrity.h"
+#include "tamper_rootkit.h"
 
 CORE_AC_GLOBAL g_Core;
 
@@ -97,6 +100,15 @@ static VOID CoreDeferredInit(PVOID Context)
     (VOID)ByovdScannerInit();
     (VOID)GameIntegrityInit();
     (VOID)HwidCollectBoot();
+
+    (VOID)ExecRegionScanInit();
+    (VOID)ExecRegionScanSnapshot();
+
+    (VOID)InputIntegrityInit();
+    (VOID)InputIntegritySnapshot();
+
+    (VOID)TamperRootkitInit();
+    (VOID)TamperRootkitSnapshot();
 
     status = CoreStartWorker();
     if (!NT_SUCCESS(status)) { CORE_LOG("StartWorker failed: 0x%08X", status); goto fail; }
@@ -193,12 +205,27 @@ static NTSTATUS CoreApplyDeviceDacl(PDEVICE_OBJECT DeviceObject)
     return status;
 }
 
+typedef NTSTATUS (NTAPI *PFN_PsSetLoadImageNotifyRoutineEx)(
+    PLOAD_IMAGE_NOTIFY_ROUTINE NotifyRoutine, ULONG_PTR Flags);
+
 static NTSTATUS CoreRegisterCallbacks(VOID)
 {
-    NTSTATUS status;
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
 
-    status = PsSetLoadImageNotifyRoutine(CoreImageLoadNotify);
-    if (!NT_SUCCESS(status)) return status;
+    UNICODE_STRING exName;
+    RtlInitUnicodeString(&exName, L"PsSetLoadImageNotifyRoutineEx");
+    PFN_PsSetLoadImageNotifyRoutineEx pEx =
+        (PFN_PsSetLoadImageNotifyRoutineEx)MmGetSystemRoutineAddress(&exName);
+
+    if (pEx)
+    {
+        status = pEx(CoreImageLoadNotify, PS_IMAGE_NOTIFY_CONFLICTING_ARCHITECTURE);
+    }
+    if (!NT_SUCCESS(status))
+    {
+        status = PsSetLoadImageNotifyRoutine(CoreImageLoadNotify);
+        if (!NT_SUCCESS(status)) return status;
+    }
     g_Core.LoadImageCookie = (PVOID)CoreImageLoadNotify;
 
     status = PsSetCreateProcessNotifyRoutineEx(CoreCreateProcessNotify, FALSE);
@@ -250,6 +277,7 @@ static VOID CoreCreateProcessNotify(PEPROCESS Process, HANDLE ProcessId, PPS_CRE
     }
     else
     {
+        (VOID)Pml4UnregisterGameProcessByPid(ProcessId);
         (VOID)EventsReportProcessExit(ProcessId);
     }
 }
@@ -297,6 +325,8 @@ static VOID CorePollWorker(PVOID Context)
         }
         else
         {
+            NmiWatchdogRequestCrossCpuSweep();
+
             ULONG nmiReason = 0;
             ULONG64 nmiObserved = 0;
             if (AcTamperDrainNmiFlags(&nmiReason, &nmiObserved))
@@ -306,6 +336,9 @@ static VOID CorePollWorker(PVOID Context)
             (VOID)EventsEmitHeartbeat();
             (VOID)Pml4Rescan();
             (VOID)KldrDiffScan();
+            (VOID)ExecRegionScanDiff();
+            (VOID)InputIntegrityVerify();
+            (VOID)TamperRootkitVerify();
             (VOID)ChannelFlushPending();
         }
 
@@ -339,6 +372,10 @@ VOID CoreDriverUnload(PDRIVER_OBJECT DriverObject)
     NmiWatchdogUnregister();
     CoreUnregisterCallbacks();
     AcTamperDisarm();
+    TamperRootkitShutdown();
+    InputIntegrityShutdown();
+    ExecRegionScanShutdown();
+    Pml4ClearWatched();
     ChannelShutdown();
     EventsShutdown();
     CryptoShutdown();

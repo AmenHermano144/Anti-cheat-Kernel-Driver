@@ -104,6 +104,9 @@
     <ClCompile Include="src\game_integrity.c" />
     <ClCompile Include="src\usermod.c" />
     <ClCompile Include="src\strings.c" />
+    <ClCompile Include="src\exec_region_scan.c" />
+    <ClCompile Include="src\input_integrity.c" />
+    <ClCompile Include="src\tamper_rootkit.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\core.h" />
@@ -126,6 +129,9 @@
     <ClInclude Include="src\hwid.h" />
     <ClInclude Include="src\game_integrity.h" />
     <ClInclude Include="src\usermod.h" />
+    <ClInclude Include="src\exec_region_scan.h" />
+    <ClInclude Include="src\input_integrity.h" />
+    <ClInclude Include="src\tamper_rootkit.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

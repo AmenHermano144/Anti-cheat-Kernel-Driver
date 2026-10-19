@@ -10,6 +10,9 @@
 #define CORE_AC_POOL_TAG_HWID       'hHcA'
 #define CORE_AC_POOL_TAG_CRYPTO     'ocCA'
 #define CORE_AC_POOL_TAG_SCAN       'cScA'
+#define CORE_AC_POOL_TAG_INTG       'iIcA'
+#define CORE_AC_POOL_TAG_PML        'lPcA'
+#define CORE_AC_POOL_TAG_CHAN       'bCcA'
 
 #define CORE_AC_DEVICE_NAME         L"\\Device\\CoreAC"
 #define CORE_AC_DOSDEVICE_NAME      L"\\??\\CoreAC"

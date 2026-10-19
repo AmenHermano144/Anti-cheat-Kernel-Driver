@@ -72,3 +72,70 @@ NTSTATUS EventsReportTeardown(VOID)
     UCHAR z = 0;
     return ChannelEnqueueRecord(WIRE_REC_TEARDOWN, &z, 1);
 }
+
+NTSTATUS EventsReportUnbackedExec(ULONG64 address, ULONG64 size, ULONG tag, ULONG flags, const UCHAR *firstBytes, ULONG firstBytesLen)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+
+    WIRE_UNBACKED_EXEC rec;
+    RtlZeroMemory(&rec, sizeof(rec));
+    rec.Address = address;
+    rec.SizeInBytes = size;
+    rec.PoolTag = tag;
+    rec.Flags = flags;
+    if (firstBytes && firstBytesLen > 0)
+    {
+        if (firstBytesLen > sizeof(rec.FirstBytes)) firstBytesLen = sizeof(rec.FirstBytes);
+        RtlCopyMemory(rec.FirstBytes, firstBytes, firstBytesLen);
+    }
+    return ChannelEnqueueRecord(WIRE_REC_UNBACKED_EXEC, &rec, sizeof(rec));
+}
+
+NTSTATUS EventsReportInputHijack(const WIRE_INPUT_HIJACK *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_INPUT_HIJACK, rec, sizeof(*rec));
+}
+
+NTSTATUS EventsReportPiddbTamper(ULONG64 tablePtr, ULONG expectedCount, ULONG observedCount, ULONG64 expectedFnv, ULONG64 observedFnv)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+
+    WIRE_PIDDB_TAMPER rec;
+    rec.TablePointer = tablePtr;
+    rec.ExpectedCount = expectedCount;
+    rec.ObservedCount = observedCount;
+    rec.ExpectedFnv = expectedFnv;
+    rec.ObservedFnv = observedFnv;
+    return ChannelEnqueueRecord(WIRE_REC_PIDDB_TAMPER, &rec, sizeof(rec));
+}
+
+NTSTATUS EventsReportMmUnloadedTamper(ULONG64 tablePtr, ULONG64 expectedFnv, ULONG64 observedFnv)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+
+    WIRE_MMUNLOADED_TAMPER rec;
+    rec.TablePointer = tablePtr;
+    rec.ExpectedFnv = expectedFnv;
+    rec.ObservedFnv = observedFnv;
+    return ChannelEnqueueRecord(WIRE_REC_MMUNLOADED_TAMPER, &rec, sizeof(rec));
+}
+
+NTSTATUS EventsReportSignatureReject(HANDLE processId, ULONG64 imageBase, NTSTATUS ntstatus, const WCHAR *path, USHORT pathBytes)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+
+    WIRE_SIG_REJECT rec;
+    RtlZeroMemory(&rec, sizeof(rec));
+    rec.ProcessId = (ULONG64)(ULONG_PTR)processId;
+    rec.ImageBase = imageBase;
+    rec.NtStatus = (ULONG)ntstatus;
+    if (path && pathBytes > 0)
+    {
+        if (pathBytes > sizeof(rec.ImagePath)) pathBytes = sizeof(rec.ImagePath);
+        rec.ImagePathLen = pathBytes;
+        RtlCopyMemory(rec.ImagePath, path, pathBytes);
+    }
+    return ChannelEnqueueRecord(WIRE_REC_SIG_REJECT, &rec, sizeof(rec));
+}

@@ -14,11 +14,15 @@ typedef enum _CHANNEL_BLOB_KIND
     CHANNEL_BLOB_HWID       = 7,
 } CHANNEL_BLOB_KIND;
 
+#define CHANNEL_BLOB_MAX_LEN       0x1000
+
 NTSTATUS ChannelInit(VOID);
 VOID     ChannelShutdown(VOID);
 
 NTSTATUS ChannelBootstrap(VOID);
 NTSTATUS ChannelAcceptBlob(CHANNEL_BLOB_KIND kind, PVOID data, ULONG len);
+NTSTATUS ChannelGetBlob(CHANNEL_BLOB_KIND kind, PVOID outBuffer, ULONG outCap, PULONG outLen);
+BOOLEAN  ChannelBlobEqualsW(CHANNEL_BLOB_KIND kind, const WCHAR *candidate, SIZE_T candidateLen);
 
 NTSTATUS ChannelEnqueueRecord(UCHAR recordType, const VOID *payload, ULONG payloadLen);
 NTSTATUS ChannelDrainEvents(PVOID outBuffer, ULONG outCap, PULONG written);

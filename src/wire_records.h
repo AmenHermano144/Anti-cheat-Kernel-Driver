@@ -16,6 +16,11 @@
 #define WIRE_REC_HWID_HELLO     0x40
 #define WIRE_REC_HWID_DISK      0x41
 #define WIRE_REC_HWID_MEMORY    0x42
+#define WIRE_REC_UNBACKED_EXEC  0x50
+#define WIRE_REC_INPUT_HIJACK   0x51
+#define WIRE_REC_PIDDB_TAMPER   0x52
+#define WIRE_REC_MMUNLOADED_TAMPER 0x53
+#define WIRE_REC_SIG_REJECT     0x55
 #define WIRE_REC_TEARDOWN       0x02
 
 #pragma pack(push, 1)
@@ -93,4 +98,49 @@ typedef struct _WIRE_HWID_HELLO
     UCHAR   SystemUuid[16];
     ULONG   RamModuleCount;
 } WIRE_HWID_HELLO, *PWIRE_HWID_HELLO;
+
+typedef struct _WIRE_UNBACKED_EXEC
+{
+    ULONG64 Address;
+    ULONG64 SizeInBytes;
+    ULONG   PoolTag;
+    ULONG   Flags;
+    UCHAR   FirstBytes[64];
+} WIRE_UNBACKED_EXEC, *PWIRE_UNBACKED_EXEC;
+
+typedef struct _WIRE_INPUT_HIJACK
+{
+    ULONG64 DeviceObject;
+    ULONG64 SlotAddress;
+    ULONG64 ExpectedCallback;
+    ULONG64 ObservedCallback;
+    ULONG64 ObservedCallbackModuleBase;
+    UCHAR   DeviceClass;
+    UCHAR   Reserved[7];
+} WIRE_INPUT_HIJACK, *PWIRE_INPUT_HIJACK;
+
+typedef struct _WIRE_PIDDB_TAMPER
+{
+    ULONG64 TablePointer;
+    ULONG   ExpectedCount;
+    ULONG   ObservedCount;
+    ULONG64 ExpectedFnv;
+    ULONG64 ObservedFnv;
+} WIRE_PIDDB_TAMPER, *PWIRE_PIDDB_TAMPER;
+
+typedef struct _WIRE_MMUNLOADED_TAMPER
+{
+    ULONG64 TablePointer;
+    ULONG64 ExpectedFnv;
+    ULONG64 ObservedFnv;
+} WIRE_MMUNLOADED_TAMPER, *PWIRE_MMUNLOADED_TAMPER;
+
+typedef struct _WIRE_SIG_REJECT
+{
+    ULONG64 ProcessId;
+    ULONG64 ImageBase;
+    ULONG   NtStatus;
+    USHORT  ImagePathLen;
+    UCHAR   ImagePath[520];
+} WIRE_SIG_REJECT, *PWIRE_SIG_REJECT;
 #pragma pack(pop)

@@ -6,6 +6,7 @@
 
 #define CHANNEL_RING_CAPACITY     256
 #define CHANNEL_RECORD_MAX_SIZE   0x1000
+#define CHANNEL_BLOB_SLOT_COUNT   8
 
 typedef struct _CHANNEL_SLOT
 {
@@ -26,8 +27,18 @@ typedef struct _CHANNEL_RING
     PCHANNEL_SLOT   Slots;
 } CHANNEL_RING, *PCHANNEL_RING;
 
-static CHANNEL_RING g_Ring;
+typedef struct _CHANNEL_BLOB_SLOT
+{
+    CHANNEL_BLOB_KIND Kind;
+    ULONG             Length;
+    UCHAR             Data[CHANNEL_BLOB_MAX_LEN];
+} CHANNEL_BLOB_SLOT, *PCHANNEL_BLOB_SLOT;
+
+static CHANNEL_RING  g_Ring;
 static volatile LONG g_ChannelReady = 0;
+static KSPIN_LOCK    g_BlobLock;
+static CHANNEL_BLOB_SLOT g_BlobSlots[CHANNEL_BLOB_SLOT_COUNT];
+static volatile LONG g_BlobCount = 0;
 
 NTSTATUS ChannelInit(VOID)
 {
@@ -38,6 +49,10 @@ NTSTATUS ChannelInit(VOID)
                                             CORE_AC_POOL_TAG_WIRE);
     if (!g_Ring.Slots) return STATUS_INSUFFICIENT_RESOURCES;
     RtlZeroMemory(g_Ring.Slots, sizeof(CHANNEL_SLOT) * CHANNEL_RING_CAPACITY);
+
+    KeInitializeSpinLock(&g_BlobLock);
+    RtlZeroMemory(g_BlobSlots, sizeof(g_BlobSlots));
+    InterlockedExchange(&g_BlobCount, 0);
 
     InterlockedExchange(&g_ChannelReady, 1);
     return STATUS_SUCCESS;
@@ -137,8 +152,106 @@ NTSTATUS ChannelFlushPending(VOID)
 
 NTSTATUS ChannelAcceptBlob(CHANNEL_BLOB_KIND kind, PVOID data, ULONG len)
 {
-    UNREFERENCED_PARAMETER(data);
-    UNREFERENCED_PARAMETER(len);
-    UNREFERENCED_PARAMETER(kind);
+    if (!data || len == 0 || len > CHANNEL_BLOB_MAX_LEN) return STATUS_INVALID_PARAMETER;
+    if (!InterlockedCompareExchange(&g_ChannelReady, 0, 0)) return CORE_AC_STATUS_NO_SESSION;
+
+    KIRQL irql;
+    KeAcquireSpinLock(&g_BlobLock, &irql);
+
+    PCHANNEL_BLOB_SLOT target = NULL;
+    for (ULONG i = 0; i < CHANNEL_BLOB_SLOT_COUNT; i++)
+    {
+        if (g_BlobSlots[i].Length != 0 && g_BlobSlots[i].Kind == kind)
+        {
+            target = &g_BlobSlots[i];
+            break;
+        }
+    }
+    if (!target)
+    {
+        for (ULONG i = 0; i < CHANNEL_BLOB_SLOT_COUNT; i++)
+        {
+            if (g_BlobSlots[i].Length == 0) { target = &g_BlobSlots[i]; break; }
+        }
+    }
+    if (!target)
+    {
+        KeReleaseSpinLock(&g_BlobLock, irql);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    target->Kind = kind;
+    target->Length = len;
+    RtlCopyMemory(target->Data, data, len);
+    if (target->Length < sizeof(target->Data))
+        RtlZeroMemory(target->Data + target->Length, sizeof(target->Data) - target->Length);
+
+    InterlockedIncrement(&g_BlobCount);
+    KeReleaseSpinLock(&g_BlobLock, irql);
     return STATUS_SUCCESS;
+}
+
+NTSTATUS ChannelGetBlob(CHANNEL_BLOB_KIND kind, PVOID outBuffer, ULONG outCap, PULONG outLen)
+{
+    if (!outLen) return STATUS_INVALID_PARAMETER;
+    *outLen = 0;
+
+    KIRQL irql;
+    KeAcquireSpinLock(&g_BlobLock, &irql);
+
+    NTSTATUS s = STATUS_NOT_FOUND;
+    for (ULONG i = 0; i < CHANNEL_BLOB_SLOT_COUNT; i++)
+    {
+        if (g_BlobSlots[i].Length != 0 && g_BlobSlots[i].Kind == kind)
+        {
+            if (!outBuffer || outCap < g_BlobSlots[i].Length)
+            {
+                *outLen = g_BlobSlots[i].Length;
+                s = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+            RtlCopyMemory(outBuffer, g_BlobSlots[i].Data, g_BlobSlots[i].Length);
+            *outLen = g_BlobSlots[i].Length;
+            s = STATUS_SUCCESS;
+            break;
+        }
+    }
+
+    KeReleaseSpinLock(&g_BlobLock, irql);
+    return s;
+}
+
+BOOLEAN ChannelBlobEqualsW(CHANNEL_BLOB_KIND kind, const WCHAR *candidate, SIZE_T candidateLen)
+{
+    if (!candidate || candidateLen == 0) return FALSE;
+
+    KIRQL irql;
+    KeAcquireSpinLock(&g_BlobLock, &irql);
+
+    BOOLEAN hit = FALSE;
+    for (ULONG i = 0; i < CHANNEL_BLOB_SLOT_COUNT; i++)
+    {
+        PCHANNEL_BLOB_SLOT s = &g_BlobSlots[i];
+        if (s->Length == 0 || s->Kind != kind) continue;
+
+        const WCHAR *stored = (const WCHAR *)s->Data;
+        SIZE_T storedLen = s->Length / sizeof(WCHAR);
+        if (storedLen > 0 && stored[storedLen - 1] == 0) storedLen--;
+
+        if (storedLen > candidateLen) continue;
+
+        const WCHAR *tail = candidate + (candidateLen - storedLen);
+        SIZE_T j = 0;
+        while (j < storedLen)
+        {
+            WCHAR a = tail[j]; if (a >= L'A' && a <= L'Z') a = (WCHAR)(a + 32);
+            WCHAR b = stored[j]; if (b >= L'A' && b <= L'Z') b = (WCHAR)(b + 32);
+            if (a != b) break;
+            j++;
+        }
+        if (j == storedLen) { hit = TRUE; break; }
+    }
+
+    KeReleaseSpinLock(&g_BlobLock, irql);
+    return hit;
 }
