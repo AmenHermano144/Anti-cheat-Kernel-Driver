@@ -36,10 +36,13 @@ Core_ac is structured so each of those three qualities can be audited independen
    │  ObSetSecurity   ──► DACL: SYSTEM + Admins only                         │
    │  ChannelInit  CryptoInit  EventsInit                                    │
    │  AcTamperArm (LSTAR snapshot)   NmiWatchdogRegister                     │
-   │  PsSetLoadImageNotifyRoutine                                            │
+   │  PsSetLoadImageNotifyRoutineEx (fallback: non-Ex)                       │
    │  PsSetCreateProcessNotifyRoutineEx                                      │
    │  KldrSnapshotModules  Pml4InitSnapshot                                  │
-   │  ByovdScannerInit  HwidCollectBoot                                      │
+   │  ByovdScannerInit  GameIntegrityInit  HwidCollectBoot                   │
+   │  ExecRegionScanInit / Snapshot        (big pool executable baseline)    │
+   │  InputIntegrityInit / Snapshot        (Mou/Kbd service callbacks)       │
+   │  TamperRootkitInit / Snapshot         (PiDDB + MmUnloadedDrivers)       │
    │  PsCreateSystemThread ──► CorePollWorker (heartbeat timer loop)         │
    └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -57,18 +60,21 @@ Only `DriverEntry` runs synchronously. Device registration, callback installatio
 | `nmi_watchdog.{c,h}` | NMI callback + cross-CPU sweep via `HalSendNMI` |
 | `env_checks.{c,h}` | Safe boot, hypervisor cpuid gate, kernel-debugger probe, module enumeration |
 | `ioctl.{c,h}` | Major function dispatch and IOCTL handlers |
-| `channels.{c,h}` | SPSC event ring, blob intake surface |
-| `wire_records.{c,h}` | Typed record layouts (heartbeat, process attach, image load, BYOVD, PML4 anomaly, tamper, HWID) |
+| `channels.{c,h}` | SPSC event ring, per-kind blob slots with case-insensitive wide-char lookup |
+| `wire_records.{c,h}` | Typed record layouts (heartbeat, process attach, image load, BYOVD, PML4 anomaly, tamper, HWID, unbacked exec, input hijack, PiDDB/MmUnloaded tamper, signature reject) |
 | `events.{c,h}` | Record producers for the detection pipelines |
 | `crypto.{c,h}` | CNG-backed SHA-256, random, AES-GCM session sealing, ECDH-P256 handshake |
 | `byovd_scanner.{c,h}` | Baked substring blacklist of 60+ vulnerable drivers (BYOVD) |
 | `driver_ts_blacklist.{c,h}` | PE `TimeDateStamp` denylist |
 | `kldr.{c,h}` | Kernel module inventory, FNV1a64 fingerprints, diff rescan |
-| `pml4_scan.{c,h}` | Physical PML4 walker via `MmCopyMemory(MM_COPY_MEMORY_PHYSICAL)` |
+| `pml4_scan.{c,h}` | Physical PML4 walker via `MmCopyMemory(MM_COPY_MEMORY_PHYSICAL)`; snapshots system CR3 and up to 8 user-registered game CR3s |
 | `physmem.{c,h}` | Physical-memory read helper |
 | `smbios.{c,h}` | SMBIOS table parse (BIOS, system, baseboard, memory) via `ZwQuerySystemInformation(RSMB)` |
 | `hwid.{c,h}` | SMBIOS roll-up, ACPI enumeration, composite SHA-256 digest |
-| `game_integrity.{c,h}` | Per-image load PE validation, hooks `CiValidateFileObject` when available |
+| `game_integrity.{c,h}` | Per-image load PE validation, threads `CiValidateFileObject` when available, binds PID to PML4 watcher on matched process load |
+| `exec_region_scan.{c,h}` | `SystemBigPoolInformation` sweep; emits `UNBACKED_EXEC` for non-paged allocations ≥ 256 B that fall outside any known kernel module |
+| `input_integrity.{c,h}` | Snapshots `MouClass`/`KbdClass` service-callback slots inside the upper filter's `DeviceExtension`; emits `INPUT_HIJACK` on drift |
+| `tamper_rootkit.{c,h}` | Pattern-resolves `PiDDBCacheTable` and `MmUnloadedDrivers`, snapshots counts + FNV, emits `PIDDB_TAMPER` / `MMUNLOADED_TAMPER` on silent mutation |
 | `usermod.{c,h}` | User-mode module walker (PEB `InLoadOrderModuleList`) |
 | `strings.{c,h}` | Kernel-safe string primitives, FNV1a 32/64, memmem, hex formatter |
 | `core.h` | Shared types, pool tags, device names, status codes |
@@ -105,7 +111,24 @@ DriverEntry
         ├─ ByovdScannerInit()                  prime FNV1a64 of blacklist
         ├─ GameIntegrityInit()                 resolve CiValidateFileObject if present
         ├─ HwidCollectBoot()                   SMBIOS fanout → wire record HWID_HELLO
+        ├─ ExecRegionScanInit + Snapshot       baseline of non-paged big pool outside known modules
+        ├─ InputIntegrityInit + Snapshot       MouClass / KbdClass service-callback slot snapshot
+        ├─ TamperRootkitInit + Snapshot        resolve + hash PiDDBCacheTable, MmUnloadedDrivers
         └─ CoreStartWorker()                   30 s heartbeat loop
+
+Heartbeat tick (every 30 s):
+
+```
+NmiWatchdogRequestCrossCpuSweep       cross-CPU LSTAR/DEBUGCTL via HalSendNMI
+AcTamperDrainNmiFlags → event         replay violations observed in NMI context
+EventsEmitHeartbeat                   WIRE_REC_HEARTBEAT
+Pml4Rescan                            system CR3 + each registered game CR3
+KldrDiffScan                          FNV1a64 diff + BYOVD late scan
+ExecRegionScanDiff                    non-paged big pool outside known modules
+InputIntegrityVerify                  class service callback slot vs. snapshot
+TamperRootkitVerify                   PiDDBCacheTable / MmUnloadedDrivers mutation
+ChannelFlushPending                   drain any deferred producers
+```
 ```
 
 ---
@@ -156,8 +179,39 @@ A composite digest (SHA-256 over the parsed structure) is cached and emitted as 
 
 ### 7.4 Image + process callbacks
 
-- `PsSetLoadImageNotifyRoutine` demultiplexes into kernel-image path (BYOVD scanner, module inventory diff) and user-image path (`WIRE_REC_IMAGE_LOAD`).
-- `PsSetCreateProcessNotifyRoutineEx` produces `WIRE_REC_PROCESS_ATTACH` (with parent PID + image path) and `WIRE_REC_PROCESS_EXIT` on teardown.
+- `PsSetLoadImageNotifyRoutineEx` (resolved dynamically through `MmGetSystemRoutineAddress`, falling back to `PsSetLoadImageNotifyRoutine`) demultiplexes into kernel-image path (BYOVD scanner, module inventory diff) and user-image path (`WIRE_REC_IMAGE_LOAD`).
+- When `ExtendedInfoPresent` is set and `CiValidateFileObject` resolved, the shim is invoked under `__try/__except`; a failing return produces `WIRE_REC_SIG_REJECT` with the image path, base and NTSTATUS.
+- `PsSetCreateProcessNotifyRoutineEx` produces `WIRE_REC_PROCESS_ATTACH` (with parent PID + image path) and `WIRE_REC_PROCESS_EXIT` on teardown; exits also drop the PML4 watcher entry.
+
+### 7.5 Unbacked execution regions
+
+`exec_region_scan.c` drives `ZwQuerySystemInformation(SystemBigPoolInformation)` (class `0x42`). For each non-paged entry ≥ 256 B whose base does not fall inside a module from the boot `KldrSnapshotModules`:
+
+- At boot it is written to the baseline (up to 1024 entries).
+- At each heartbeat, anything new relative to that baseline is enqueued as `WIRE_REC_UNBACKED_EXEC` with up to 64 bytes of leading content, the pool tag, and a `Flags` bit set when the tag has non-printable bytes (useful heuristic for tags such as `'llehS'` left by shellcode trampolines).
+
+Capped at 32 hits per pass to prevent telemetry floods.
+
+### 7.6 Input class callback integrity
+
+`input_integrity.c` references `\Driver\MouHID`, `\Driver\KbdHid` and `\Driver\i8042prt`, walks each upper device's `AttachedDevice` chain, and for every paired `\Driver\MouClass` / `\Driver\KbdClass` device scans the upper device's `DeviceExtension`. When it finds a slot whose value equals the class `PDEVICE_OBJECT` and whose next slot points above the class `PDRIVER_OBJECT`, that next slot holds the service callback. The slot address and its current value are snapshotted.
+
+At each heartbeat the slot is re-read under `__try/__except`. If the pointer no longer matches the snapshot and does not land inside any module known at boot, a `WIRE_REC_INPUT_HIJACK` is emitted along with a `WIRE_REC_TAMPER(AC_TAMPER_REASON_INPUT)`.
+
+### 7.7 PiDDBCache / MmUnloadedDrivers mutation
+
+`tamper_rootkit.c` pattern-scans `ci.dll:.text` with the 21H1 and 22H2 signatures to resolve `PiDDBCacheTable`, and `ntoskrnl:.text` to resolve `MmUnloadedDrivers`. Snapshot captures:
+
+- `RTL_AVL_TABLE.NumberGenericTableElements` combined with `DeleteCount` as a composite FNV.
+- FNV1a64 over the names + unload-time of up to 50 `MmUnloadedDrivers` entries.
+
+On rescan, a drop in the AVL element count, or any FNV mismatch, produces `WIRE_REC_PIDDB_TAMPER` / `WIRE_REC_MMUNLOADED_TAMPER` and routes a `WIRE_REC_TAMPER` with the appropriate reason code. Legitimate growth is folded into the expected state so the detector does not become sticky.
+
+### 7.8 Game-process PML4 drift
+
+When the companion pushes an executable path via `IOCTL_AC_PUSH_PROCESS_PATH`, `game_integrity.c` matches the next user-image load's `FullImageName` against that blob (case-insensitive, tail match on wide chars). On a hit, `Pml4RegisterGameProcessByPid` resolves the target CR3 by attaching with `KeStackAttachProcess` + `__readcr3()` and snapshots its PML4 physical page. The heartbeat rescans each registered CR3 the same way the system CR3 is rescanned and emits `WIRE_REC_PML4_ANOMALY` with the owning physical base.
+
+Up to `PML4_MAX_WATCHED` (8) processes can be registered concurrently. Entries are released on process-exit or driver unload.
 
 ---
 
@@ -194,6 +248,23 @@ Payload types in this build:
 | `0x40` | `HWID_HELLO` | `WIRE_HWID_HELLO` |
 | `0x41` | `HWID_DISK` | reserved |
 | `0x42` | `HWID_MEMORY` | reserved |
+| `0x50` | `UNBACKED_EXEC` | `WIRE_UNBACKED_EXEC` |
+| `0x51` | `INPUT_HIJACK` | `WIRE_INPUT_HIJACK` |
+| `0x52` | `PIDDB_TAMPER` | `WIRE_PIDDB_TAMPER` |
+| `0x53` | `MMUNLOADED_TAMPER` | `WIRE_MMUNLOADED_TAMPER` |
+| `0x55` | `SIG_REJECT` | `WIRE_SIG_REJECT` |
+
+Tamper reason codes carried by `WIRE_TAMPER.Reason`:
+
+| Code | Name | Trigger |
+|---:|---|---|
+| `0x1001` | `LSTAR`      | `KiSystemCall64` MSR drift (IOCTL + NMI) |
+| `0x1002` | `STACK`      | Boot stack-cookie XOR pair mismatch |
+| `0x1003` | `DEBUGCTL`   | `IA32_DEBUGCTL.LBR` set (NMI context) |
+| `0x1004` | `NMI_SKEW`   | reserved for cross-CPU timing drift |
+| `0x1005` | `PIDDB`      | `PiDDBCacheTable` count/FNV drift |
+| `0x1006` | `MMUNLOADED` | `MmUnloadedDrivers` FNV drift |
+| `0x1007` | `INPUT`      | Input class service callback drift |
 
 User mode drains the ring by issuing `IOCTL_AC_EVENT_POLL` with an output buffer; the driver copies as many whole records as fit and returns the byte count via `IoStatus.Information`.
 
@@ -208,16 +279,18 @@ User mode drains the ring by issuing `IOCTL_AC_EVENT_POLL` with an output buffer
 | `0x803` | `IOCTL_AC_KEY_EXCHANGE` | 32 in / 32 out | ECDH-P256-based session key handshake |
 | `0x804` | `IOCTL_AC_PUSH_SESSION_UUID` | GUID in | Bind driver state to a match UUID |
 | `0x805` | `IOCTL_AC_EVENT_POLL` | out | Drain the event ring |
-| `0x806` | `IOCTL_AC_PUSH_MATCH` | blob in | Hand match metadata to the driver |
+| `0x806` | `IOCTL_AC_PUSH_MATCH` | blob in | Hand match metadata (stored under `CHANNEL_BLOB_MATCH`) |
 | `0x807` | `IOCTL_AC_MATCH_OVER` | — | Match teardown signal |
-| `0x808` | `IOCTL_AC_PUSH_WATCHLIST` | blob in | Dynamic BYOVD watchlist from service |
-| `0x809` | `IOCTL_AC_PUSH_PROCESS_PATH` | blob in | Register expected process image path |
-| `0x80A` | `IOCTL_AC_PUSH_HASH` | blob in | Expected module hash |
-| `0x80B` | `IOCTL_AC_PUSH_VENDOR_CN` | blob in | Trusted signing CN |
-| `0x80C` | `IOCTL_AC_PUSH_USB_DEVICE` | blob in | USB device descriptor |
+| `0x808` | `IOCTL_AC_PUSH_WATCHLIST` | blob in | Dynamic BYOVD watchlist (stored under `CHANNEL_BLOB_WATCHLIST`) |
+| `0x809` | `IOCTL_AC_PUSH_PROCESS_PATH` | wide-char blob in | Register expected game executable path for PML4 watcher (stored under `CHANNEL_BLOB_PROCESS`) |
+| `0x80A` | `IOCTL_AC_PUSH_HASH` | blob in | Expected module hash (stored under `CHANNEL_BLOB_HASH`) |
+| `0x80B` | `IOCTL_AC_PUSH_VENDOR_CN` | blob in | Trusted signing CN (stored under `CHANNEL_BLOB_VENDOR`) |
+| `0x80C` | `IOCTL_AC_PUSH_USB_DEVICE` | blob in | USB device descriptor (stored under `CHANNEL_BLOB_USB`) |
 | `0x80D` | `IOCTL_AC_PUSH_U64_SET` | blob in | Opaque u64 configuration constants |
 | `0x80E` | `IOCTL_AC_DRIVER_EVENT` | blob in | Companion-origin driver event |
 | `0x80F` | `IOCTL_AC_PUSH_CMD` | blob in | Companion → driver command |
+
+Blob slots are keyed by `CHANNEL_BLOB_KIND`, replaced in place on a repeat push, and read back by subsystems via `ChannelGetBlob` or the suffix-match helper `ChannelBlobEqualsW`.
 
 Every IOCTL dispatch runs through `AcTamperCheckLstar()` first.
 
@@ -295,8 +368,9 @@ The companion service is expected to:
 2. Generate an ephemeral ECDH-P256 keypair and send the public to `IOCTL_AC_KEY_EXCHANGE`.
 3. Derive the shared secret the same way the driver does (SHA-256 over `client_pub || server_pub`).
 4. Issue `IOCTL_AC_PUSH_SESSION_UUID` with the match's GUID.
-5. Poll `IOCTL_AC_EVENT_POLL` on a cadence that keeps the ring from wrapping (10–30 Hz is comfortable for competitive sessions).
-6. On match end, issue `IOCTL_AC_MATCH_OVER`.
+5. Issue `IOCTL_AC_PUSH_PROCESS_PATH` with the game executable's path (wide-char, UTF-16, raw buffer — not a UNICODE_STRING). The driver tail-matches it case-insensitively against each new user-image load's `FullImageName`, so sending the bare filename (e.g. `cs2.exe`) or a full `\Device\HarddiskVolumeN\...\cs2.exe` both work. Push this **before** the game launches; the driver resolves the CR3 off the first matching image load and starts watching that PML4.
+6. Poll `IOCTL_AC_EVENT_POLL` on a cadence that keeps the ring from wrapping (10–30 Hz is comfortable for competitive sessions).
+7. On match end, issue `IOCTL_AC_MATCH_OVER`.
 
 The driver does not initiate outbound traffic. All telemetry flows through poll.
 
@@ -338,11 +412,14 @@ This driver was authored as a reference implementation for authorized anti-cheat
 
 Suggested next steps for anyone taking this further:
 
-- Replace the baked BYOVD list with a service-pushed, signature-verified blob delivered through `IOCTL_AC_PUSH_WATCHLIST`.
+- Replace the baked BYOVD list with a service-pushed, signature-verified blob delivered through `IOCTL_AC_PUSH_WATCHLIST` (`CHANNEL_BLOB_WATCHLIST` is already captured; `byovd_scanner` just needs to consume it).
 - Add disk + NIC MAC fingerprinting to the HWID pipeline (`IOCTL_STORAGE_QUERY_PROPERTY`, `NDIS_OID_802_3_PERMANENT_ADDRESS`).
-- Thread `CiValidateFileObject` into the kernel-image load path to reject revoked signatures before they execute.
-- Add a per-record AES-GCM sealing step on egress through `IOCTL_AC_EVENT_POLL` so the companion never sees plaintext on the wire.
+- Add a per-record AES-GCM sealing step on egress through `IOCTL_AC_EVENT_POLL` so the companion never sees plaintext on the wire; the CNG primitives (`CryptoSealRecord` / `CryptoOpenRecord`) are already in place.
 - Add a VBS/HVCI gate that upgrades the HWID pipeline from "best effort" to "required" when the host is already running a Microsoft-measured launch.
+- Walk the interrupted thread's `TrapFrame` from inside the NMI callback and attribute `RIP` to a known module — current coverage reaches that execution surface through the periodic `exec_region_scan` baseline, but a per-NMI check closes the gap for very short-lived trampolines.
+- Grow the `KldrSnapshotModules` baseline incrementally on legitimate image-load notifies so that drivers loaded post-boot do not raise `UNBACKED_EXEC` for their own pool.
+- Extend `input_integrity` to HIDClass filter chains (gamepads / tablet drivers) once the per-device-type extension layout is codified.
+- Add signature-based device-namespace enumeration (`\Device\{GUID}` lookups) to flag drivers that create devices named with raw GUIDs under drivers not covered by a trusted vendor whitelist.
 
 ---
 
