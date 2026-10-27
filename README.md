@@ -44,6 +44,7 @@ Core_ac is structured so each of those three qualities can be audited independen
    │  InputIntegrityInit / Snapshot        (Mou/Kbd service callbacks)       │
    │  TamperRootkitInit / Snapshot         (PiDDB + MmUnloadedDrivers)       │
    │  HookAuditInit / RegisterCallbacks    (CreateThreadNotify + ObReg)      │
+   │  OverlayDetectInit                    (window-flag + parent-chain flag) │
    │  PsCreateSystemThread ──► CorePollWorker (heartbeat timer loop)         │
    └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -62,7 +63,7 @@ Only `DriverEntry` runs synchronously. Device registration, callback installatio
 | `env_checks.{c,h}` | Safe boot, hypervisor cpuid gate, kernel-debugger probe, module enumeration |
 | `ioctl.{c,h}` | Major function dispatch and IOCTL handlers |
 | `channels.{c,h}` | SPSC event ring, per-kind blob slots with case-insensitive wide-char lookup |
-| `wire_records.{c,h}` | Typed record layouts (heartbeat, process attach, image load, BYOVD, PML4 anomaly, tamper, HWID, unbacked exec, input hijack, PiDDB/MmUnloaded tamper, signature reject) |
+| `wire_records.{c,h}` | Typed record layouts (heartbeat, process attach, image load, BYOVD, PML4 anomaly, tamper, HWID, unbacked exec, input hijack, PiDDB/MmUnloaded tamper, signature reject, hook/handle audit, overlay detect) |
 | `events.{c,h}` | Record producers for the detection pipelines |
 | `crypto.{c,h}` | CNG-backed SHA-256, random, AES-GCM session sealing, ECDH-P256 handshake |
 | `byovd_scanner.{c,h}` | Baked substring blacklist of 60+ vulnerable drivers (BYOVD) |
@@ -77,6 +78,7 @@ Only `DriverEntry` runs synchronously. Device registration, callback installatio
 | `input_integrity.{c,h}` | Snapshots `MouClass`/`KbdClass` service-callback slots inside the upper filter's `DeviceExtension`; emits `INPUT_HIJACK` on drift |
 | `tamper_rootkit.{c,h}` | Pattern-resolves `PiDDBCacheTable` and `MmUnloadedDrivers`, snapshots counts + FNV, emits `PIDDB_TAMPER` / `MMUNLOADED_TAMPER` on silent mutation |
 | `hook_audit.{c,h}` | `PsSetCreateThreadNotifyRoutine` + `ObRegisterCallbacks` + user-image heuristic over protected game PIDs; emits `HOOK_AUDIT` / `HANDLE_AUDIT` for the `SetWindowsHookEx` / `SetProp[2]` abuse surface Vanguard captures through SSDT detours |
+| `overlay_detect.{c,h}` | Overlay detector: parses window extended-style flags pushed from the companion, walks the owner's parent chain (built from `PsSetCreateProcessNotifyRoutineEx`), checks for a whitelisted shell ancestor, matches cheat-style class names, and sets bits on a module-wide flag variable; emits `OVERLAY_DETECT` |
 | `usermod.{c,h}` | User-mode module walker (PEB `InLoadOrderModuleList`) |
 | `strings.{c,h}` | Kernel-safe string primitives, FNV1a 32/64, memmem, hex formatter |
 | `core.h` | Shared types, pool tags, device names, status codes |
@@ -117,6 +119,7 @@ DriverEntry
         ├─ InputIntegrityInit + Snapshot       MouClass / KbdClass service-callback slot snapshot
         ├─ TamperRootkitInit + Snapshot        resolve + hash PiDDBCacheTable, MmUnloadedDrivers
         ├─ HookAuditInit + RegisterCallbacks   PsSetCreateThreadNotifyRoutine + ObRegisterCallbacks
+        ├─ OverlayDetectInit()                 pid→parent map + overlay flag variable
         └─ CoreStartWorker()                   30 s heartbeat loop
 
 Heartbeat tick (every 30 s):
@@ -232,6 +235,37 @@ The audit record mirrors the field set Vanguard's `VGK_WINDOWS_HOOK_AUDIT` carri
 
 Protected PIDs are published by `game_integrity.c` whenever a user-image load matches the companion-registered path (`CHANNEL_BLOB_PROCESS`), and cleared on process exit from the shared `PsSetCreateProcessNotifyRoutineEx` sink. Both the thread notify and the object callback no-op when the PID is not in that set, so the hot path cost on normal system traffic is a single interlocked read.
 
+### 7.10 Overlay detection (window flags + parent chain)
+
+`overlay_detect.c` catches overlay cheats by inspecting the extended-style flags that overlay windows almost always set, and cross-referencing the owning process against a parent-chain lineage built from the kernel's own process callback. Window enumeration itself is session-specific win32k state, so the companion service does the `EnumWindows` + `GetWindowLongPtr(GWL_EXSTYLE)` + `GetWindowThreadProcessId` pass and pushes each candidate into the driver through `IOCTL_AC_REPORT_WINDOW` as an `OVERLAY_WINDOW_REPORT`. The driver then evaluates:
+
+- **Flag parse.** `WS_EX_LAYERED (0x80000)`, `WS_EX_TRANSPARENT (0x20)`, `WS_EX_TOPMOST (0x8)`, `WS_EX_NOACTIVATE (0x08000000)`, `WS_EX_TOOLWINDOW (0x80)`, `WS_EX_COMPOSITED (0x02000000)`, `WS_POPUP (0x80000000)`. The combination `WS_EX_LAYERED | WS_EX_TRANSPARENT` is tagged as `OVERLAY_FLAG_CLICKTHROUGH_COMBO` — this is the signature of a window that draws on top of the game but passes clicks through to it, i.e. the overlay rendering primitive used by essentially every ESP/aimbot overlay stack. Any three-of-five hit across `{TOPMOST, NOACTIVATE, TOOLWINDOW, LAYERED, POPUP}` is treated as overlay-shaped and triggers deeper analysis.
+
+- **Process whitelist short-circuit.** The owning PID is resolved to its short image name through `PsGetProcessImageFileName`. Legitimate systems paint layered-topmost windows constantly — `dwm.exe`, `explorer.exe`, `sihost.exe`, `TextInputHost.exe`, `ApplicationFrameHost.exe`, `StartMenuExperienceHost.exe`, `ShellExperienceHost.exe`, `SearchUI.exe`, `SearchHost.exe`, `LockApp.exe`, `RuntimeBroker.exe`, `winlogon.exe`, `csrss.exe`, `fontdrvhost.exe`, `nvcontainer.exe`, `NVIDIA Share.exe`, `NVIDIA Overlay.exe`, and so on. A direct hit on that list ends evaluation.
+
+- **Parent chain.** `overlay_detect` maintains its own `pid → parent_pid` map (1024 slots, spinlock-guarded) that is populated from the existing `PsSetCreateProcessNotifyRoutineEx` callback — `CreateInfo->ParentProcessId` on create, slot cleared on exit. Evaluation walks up to 16 ancestors looking for a whitelisted shell process. No whitelisted ancestor + overlay flags → `OVERLAY_FLAG_UNRELATED_PROCESS`. A missing parent entry (e.g. a process older than the driver load) raises `OVERLAY_FLAG_FOREIGN_PARENT`.
+
+- **Class-name heuristic.** Tail-matches the reported class name against known cheat-overlay suffixes (`ImGui`, `ImGui Platform`, `CEF-OSC-WIDGET`, `Chrome_WidgetWin_0/1`, `*Overlay`). A hit sets `OVERLAY_FLAG_KNOWN_CLASS` and marks the window suspicious on its own.
+
+- **Verdict.** A window is suspicious when any of (a) click-through combo + topmost/noactivate/toolwindow, (b) click-through combo + unrelated-process, or (c) known cheat class name hold. On a suspicious hit the module `InterlockedOr`s the full detect bitmap into the module-wide `volatile LONG g_OverlayFlag`, emits `WIRE_REC_OVERLAY_DETECT` (owner PID, parent PID, HWND, style/ex-style, detect flags, class name, title), and routes a `WIRE_REC_TAMPER(AC_TAMPER_REASON_OVERLAY)` carrying the owner PID.
+
+The flag variable is the "set a bit when overlay seen" surface the detector exposes outside its own module. User mode can read it back directly via `IOCTL_AC_QUERY_OVERLAY_FLAG`; other kernel modules can call `OverlayDetectGetFlag()` / `OverlayDetectClearFlag()`. Detect-flag bits exposed in `overlay_detect.h`:
+
+| Bit | Name | Meaning |
+|---:|---|---|
+| `0x0001` | `LAYERED`           | `WS_EX_LAYERED` present |
+| `0x0002` | `TRANSPARENT`       | `WS_EX_TRANSPARENT` present (click-through) |
+| `0x0004` | `TOPMOST`           | `WS_EX_TOPMOST` present |
+| `0x0008` | `NOACTIVATE`        | `WS_EX_NOACTIVATE` present (window does not steal focus) |
+| `0x0010` | `TOOLWINDOW`        | `WS_EX_TOOLWINDOW` present (hidden from Alt-Tab / taskbar) |
+| `0x0020` | `COMPOSITED`        | `WS_EX_COMPOSITED` present |
+| `0x0040` | `POPUP`             | `WS_POPUP` present |
+| `0x0100` | `CLICKTHROUGH_COMBO`| `LAYERED` + `TRANSPARENT` co-occur |
+| `0x0200` | `UNRELATED_PROCESS` | No whitelisted ancestor within 16 hops |
+| `0x0400` | `FOREIGN_PARENT`    | Parent PID not tracked (process predates driver load) |
+| `0x0800` | `KNOWN_CLASS`       | Class name matched a cheat-overlay suffix |
+| `0x1000` | `SUSPICIOUS`        | Composite verdict — at least one of the suspicious conditions held |
+
 ---
 
 ## 8. Wire protocol
@@ -274,6 +308,7 @@ Payload types in this build:
 | `0x55` | `SIG_REJECT` | `WIRE_SIG_REJECT` |
 | `0x56` | `HOOK_AUDIT` | `WIRE_HOOK_AUDIT` |
 | `0x57` | `HANDLE_AUDIT` | `WIRE_HANDLE_AUDIT` |
+| `0x58` | `OVERLAY_DETECT` | `WIRE_OVERLAY_DETECT` |
 
 Tamper reason codes carried by `WIRE_TAMPER.Reason`:
 
@@ -289,6 +324,7 @@ Tamper reason codes carried by `WIRE_TAMPER.Reason`:
 | `0x1008` | `REMOTE_THREAD` | Cross-process thread create into protected game PID |
 | `0x1009` | `HOOK_INJECT`   | Parasite DLL load into protected game PID |
 | `0x100A` | `HANDLE_STRIP`  | Dangerous access rights stripped on cross-process open |
+| `0x100B` | `OVERLAY`       | Overlay-shaped window owned by an untrusted process lineage |
 
 User mode drains the ring by issuing `IOCTL_AC_EVENT_POLL` with an output buffer; the driver copies as many whole records as fit and returns the byte count via `IoStatus.Information`.
 
@@ -313,6 +349,8 @@ User mode drains the ring by issuing `IOCTL_AC_EVENT_POLL` with an output buffer
 | `0x80D` | `IOCTL_AC_PUSH_U64_SET` | blob in | Opaque u64 configuration constants |
 | `0x80E` | `IOCTL_AC_DRIVER_EVENT` | blob in | Companion-origin driver event |
 | `0x80F` | `IOCTL_AC_PUSH_CMD` | blob in | Companion → driver command |
+| `0x810` | `IOCTL_AC_REPORT_WINDOW` | `OVERLAY_WINDOW_REPORT` in | Push one window's PID/HWND/style/ex-style/class/title for overlay evaluation |
+| `0x811` | `IOCTL_AC_QUERY_OVERLAY_FLAG` | 4 B out | Read the current `g_OverlayFlag` bitmap |
 
 Blob slots are keyed by `CHANNEL_BLOB_KIND`, replaced in place on a repeat push, and read back by subsystems via `ChannelGetBlob` or the suffix-match helper `ChannelBlobEqualsW`.
 
@@ -394,7 +432,8 @@ The companion service is expected to:
 4. Issue `IOCTL_AC_PUSH_SESSION_UUID` with the match's GUID.
 5. Issue `IOCTL_AC_PUSH_PROCESS_PATH` with the game executable's path (wide-char, UTF-16, raw buffer — not a UNICODE_STRING). The driver tail-matches it case-insensitively against each new user-image load's `FullImageName`, so sending the bare filename (e.g. `cs2.exe`) or a full `\Device\HarddiskVolumeN\...\cs2.exe` both work. Push this **before** the game launches; the driver resolves the CR3 off the first matching image load and starts watching that PML4.
 6. Poll `IOCTL_AC_EVENT_POLL` on a cadence that keeps the ring from wrapping (10–30 Hz is comfortable for competitive sessions).
-7. On match end, issue `IOCTL_AC_MATCH_OVER`.
+7. Enumerate top-level windows (`EnumWindows` + `GetWindowLongPtrW(GWL_STYLE/GWL_EXSTYLE)` + `GetWindowThreadProcessId` + `GetClassNameW` + `GetWindowTextW`) at 1–2 Hz and push each candidate to `IOCTL_AC_REPORT_WINDOW` as an `OVERLAY_WINDOW_REPORT`. The driver filters internally — it is fine to feed every top-level window. Optionally re-read `IOCTL_AC_QUERY_OVERLAY_FLAG` to pull back the current `g_OverlayFlag` bitmap for the companion's own UI.
+8. On match end, issue `IOCTL_AC_MATCH_OVER`.
 
 The driver does not initiate outbound traffic. All telemetry flows through poll.
 
@@ -444,6 +483,7 @@ Suggested next steps for anyone taking this further:
 - Grow the `KldrSnapshotModules` baseline incrementally on legitimate image-load notifies so that drivers loaded post-boot do not raise `UNBACKED_EXEC` for their own pool.
 - Extend `input_integrity` to HIDClass filter chains (gamepads / tablet drivers) once the per-device-type extension layout is codified.
 - Add signature-based device-namespace enumeration (`\Device\{GUID}` lookups) to flag drivers that create devices named with raw GUIDs under drivers not covered by a trusted vendor whitelist.
+- Promote the overlay detector from companion-driven window reports to a direct kernel walk of `tagWND` through `PsGetProcessWin32Process`, so the detector covers windows the companion cannot see (hidden toplevel, cross-session, injected via `NtUserCreateWindowEx` from a sandboxed process).
 
 ---
 

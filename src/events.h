@@ -19,3 +19,4 @@ NTSTATUS EventsReportMmUnloadedTamper(ULONG64 tablePtr, ULONG64 expectedFnv, ULO
 NTSTATUS EventsReportSignatureReject(HANDLE processId, ULONG64 imageBase, NTSTATUS ntstatus, const WCHAR *path, USHORT pathBytes);
 NTSTATUS EventsReportHookAudit(const WIRE_HOOK_AUDIT *rec);
 NTSTATUS EventsReportHandleAudit(const WIRE_HANDLE_AUDIT *rec);
+NTSTATUS EventsReportOverlay(const WIRE_OVERLAY_DETECT *rec);

@@ -153,3 +153,10 @@ NTSTATUS EventsReportHandleAudit(const WIRE_HANDLE_AUDIT *rec)
     if (!rec) return STATUS_INVALID_PARAMETER;
     return ChannelEnqueueRecord(WIRE_REC_HANDLE_AUDIT, rec, sizeof(*rec));
 }
+
+NTSTATUS EventsReportOverlay(const WIRE_OVERLAY_DETECT *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_OVERLAY_DETECT, rec, sizeof(*rec));
+}

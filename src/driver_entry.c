@@ -16,6 +16,7 @@
 #include "input_integrity.h"
 #include "tamper_rootkit.h"
 #include "hook_audit.h"
+#include "overlay_detect.h"
 
 CORE_AC_GLOBAL g_Core;
 
@@ -113,6 +114,8 @@ static VOID CoreDeferredInit(PVOID Context)
 
     (VOID)HookAuditInit();
     (VOID)HookAuditRegisterCallbacks();
+
+    (VOID)OverlayDetectInit();
 
     status = CoreStartWorker();
     if (!NT_SUCCESS(status)) { CORE_LOG("StartWorker failed: 0x%08X", status); goto fail; }
@@ -280,11 +283,13 @@ static VOID CoreCreateProcessNotify(PEPROCESS Process, HANDLE ProcessId, PPS_CRE
     if (CreateInfo)
     {
         (VOID)EventsReportProcessAttach(ProcessId, CreateInfo);
+        OverlayDetectOnProcessCreate(ProcessId, CreateInfo->ParentProcessId);
     }
     else
     {
         (VOID)Pml4UnregisterGameProcessByPid(ProcessId);
         (VOID)GameIntegrityOnProcessExit(ProcessId);
+        OverlayDetectOnProcessExit(ProcessId);
         (VOID)EventsReportProcessExit(ProcessId);
     }
 }
@@ -380,6 +385,7 @@ VOID CoreDriverUnload(PDRIVER_OBJECT DriverObject)
     CoreUnregisterCallbacks();
     HookAuditUnregisterCallbacks();
     AcTamperDisarm();
+    OverlayDetectShutdown();
     HookAuditShutdown();
     TamperRootkitShutdown();
     InputIntegrityShutdown();

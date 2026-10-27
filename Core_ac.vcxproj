@@ -110,6 +110,7 @@
     <ClCompile Include="src\input_integrity.c" />
     <ClCompile Include="src\tamper_rootkit.c" />
     <ClCompile Include="src\hook_audit.c" />
+    <ClCompile Include="src\overlay_detect.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\core.h" />
@@ -136,6 +137,7 @@
     <ClInclude Include="src\input_integrity.h" />
     <ClInclude Include="src\tamper_rootkit.h" />
     <ClInclude Include="src\hook_audit.h" />
+    <ClInclude Include="src\overlay_detect.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

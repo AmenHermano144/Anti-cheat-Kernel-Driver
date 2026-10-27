@@ -5,6 +5,7 @@
 #include "events.h"
 #include "hwid.h"
 #include "strings.h"
+#include "overlay_detect.h"
 
 static NTSTATUS CompleteIrp(PIRP Irp, NTSTATUS Status, ULONG Info)
 {
@@ -94,6 +95,25 @@ static NTSTATUS HandlePushWatchlist(PVOID buf, ULONG inLen, ULONG outLen, ULONG 
     return ChannelAcceptBlob(CHANNEL_BLOB_WATCHLIST, buf, inLen);
 }
 
+static NTSTATUS HandleReportWindow(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(outLen);
+    *written = 0;
+    if (!buf || inLen < sizeof(OVERLAY_WINDOW_REPORT)) return STATUS_INVALID_PARAMETER;
+    return OverlayDetectEvaluateReport((const OVERLAY_WINDOW_REPORT *)buf);
+}
+
+static NTSTATUS HandleQueryOverlayFlag(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(inLen);
+    *written = 0;
+    if (!buf || outLen < sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
+    ULONG value = OverlayDetectGetFlag();
+    RtlCopyMemory(buf, &value, sizeof(value));
+    *written = sizeof(value);
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS CoreIoctlDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     UNREFERENCED_PARAMETER(DeviceObject);
@@ -154,6 +174,12 @@ NTSTATUS CoreIoctlDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     case IOCTL_AC_DRIVER_EVENT:
         if (!buf || inLen == 0) { s = STATUS_INVALID_PARAMETER; break; }
         s = ChannelAcceptBlob(CHANNEL_BLOB_GENERIC, buf, inLen);
+        break;
+    case IOCTL_AC_REPORT_WINDOW:
+        s = HandleReportWindow(buf, inLen, outLen, &written);
+        break;
+    case IOCTL_AC_QUERY_OVERLAY_FLAG:
+        s = HandleQueryOverlayFlag(buf, inLen, outLen, &written);
         break;
     default:
         break;

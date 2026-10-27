@@ -23,6 +23,7 @@
 #define WIRE_REC_SIG_REJECT     0x55
 #define WIRE_REC_HOOK_AUDIT     0x56
 #define WIRE_REC_HANDLE_AUDIT   0x57
+#define WIRE_REC_OVERLAY_DETECT 0x58
 #define WIRE_REC_TEARDOWN       0x02
 
 #define WIRE_HOOK_OP_REMOTE_THREAD   1
@@ -187,4 +188,19 @@ typedef struct _WIRE_HANDLE_AUDIT
     USHORT  CallerImagePathLen;
     UCHAR   CallerImagePath[520];
 } WIRE_HANDLE_AUDIT, *PWIRE_HANDLE_AUDIT;
+
+typedef struct _WIRE_OVERLAY_DETECT
+{
+    ULONG64 ProcessId;
+    ULONG64 ParentProcessId;
+    ULONG64 WindowHandle;
+    ULONG   Style;
+    ULONG   ExStyle;
+    ULONG   DetectFlags;
+    ULONG   Reserved;
+    USHORT  ClassNameLen;
+    USHORT  TitleLen;
+    WCHAR   ClassName[64];
+    WCHAR   Title[128];
+} WIRE_OVERLAY_DETECT, *PWIRE_OVERLAY_DETECT;
 #pragma pack(pop)
