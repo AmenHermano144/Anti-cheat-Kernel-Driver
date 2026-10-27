@@ -43,6 +43,7 @@ Core_ac is structured so each of those three qualities can be audited independen
    │  ExecRegionScanInit / Snapshot        (big pool executable baseline)    │
    │  InputIntegrityInit / Snapshot        (Mou/Kbd service callbacks)       │
    │  TamperRootkitInit / Snapshot         (PiDDB + MmUnloadedDrivers)       │
+   │  HookAuditInit / RegisterCallbacks    (CreateThreadNotify + ObReg)      │
    │  PsCreateSystemThread ──► CorePollWorker (heartbeat timer loop)         │
    └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -75,6 +76,7 @@ Only `DriverEntry` runs synchronously. Device registration, callback installatio
 | `exec_region_scan.{c,h}` | `SystemBigPoolInformation` sweep; emits `UNBACKED_EXEC` for non-paged allocations ≥ 256 B that fall outside any known kernel module |
 | `input_integrity.{c,h}` | Snapshots `MouClass`/`KbdClass` service-callback slots inside the upper filter's `DeviceExtension`; emits `INPUT_HIJACK` on drift |
 | `tamper_rootkit.{c,h}` | Pattern-resolves `PiDDBCacheTable` and `MmUnloadedDrivers`, snapshots counts + FNV, emits `PIDDB_TAMPER` / `MMUNLOADED_TAMPER` on silent mutation |
+| `hook_audit.{c,h}` | `PsSetCreateThreadNotifyRoutine` + `ObRegisterCallbacks` + user-image heuristic over protected game PIDs; emits `HOOK_AUDIT` / `HANDLE_AUDIT` for the `SetWindowsHookEx` / `SetProp[2]` abuse surface Vanguard captures through SSDT detours |
 | `usermod.{c,h}` | User-mode module walker (PEB `InLoadOrderModuleList`) |
 | `strings.{c,h}` | Kernel-safe string primitives, FNV1a 32/64, memmem, hex formatter |
 | `core.h` | Shared types, pool tags, device names, status codes |
@@ -114,6 +116,7 @@ DriverEntry
         ├─ ExecRegionScanInit + Snapshot       baseline of non-paged big pool outside known modules
         ├─ InputIntegrityInit + Snapshot       MouClass / KbdClass service-callback slot snapshot
         ├─ TamperRootkitInit + Snapshot        resolve + hash PiDDBCacheTable, MmUnloadedDrivers
+        ├─ HookAuditInit + RegisterCallbacks   PsSetCreateThreadNotifyRoutine + ObRegisterCallbacks
         └─ CoreStartWorker()                   30 s heartbeat loop
 
 Heartbeat tick (every 30 s):
@@ -127,6 +130,8 @@ KldrDiffScan                          FNV1a64 diff + BYOVD late scan
 ExecRegionScanDiff                    non-paged big pool outside known modules
 InputIntegrityVerify                  class service callback slot vs. snapshot
 TamperRootkitVerify                   PiDDBCacheTable / MmUnloadedDrivers mutation
+                                      hook_audit records flow directly from the
+                                      thread notify + ObReg pre-op + image-load path
 ChannelFlushPending                   drain any deferred producers
 ```
 ```
@@ -213,6 +218,20 @@ When the companion pushes an executable path via `IOCTL_AC_PUSH_PROCESS_PATH`, `
 
 Up to `PML4_MAX_WATCHED` (8) processes can be registered concurrently. Entries are released on process-exit or driver unload.
 
+### 7.9 Protected-process hook / handle audit
+
+`hook_audit.c` closes the attack surface that Vanguard covers with its native hooks on `NtUserSetWindowsHookEx`, `NtUserSetProp` and `NtUserSetProp2` — all three are the user-mode plumbing for parasite-DLL injection and foreign window-ownership mutation against the game process. Core_ac refuses to install an SSDT or inline detour (section 14 of this document); instead it collects the same audit intent through three documented kernel surfaces and gates every signal on the protected-PID set published by `game_integrity`:
+
+- **Cross-process thread creation.** `PsSetCreateThreadNotifyRoutine` fires in the context of the thread being created. On every `Create == TRUE` whose target PID is a protected game PID and whose creator PID is not the target, we emit `WIRE_REC_HOOK_AUDIT` with `Operation = REMOTE_THREAD`, caller image path (`SeLocateProcessImageName`), caller TID, target image name (`PsGetProcessImageFileName`), and a KUSER_SHARED timestamp read under `__try/__except`. We also route a `WIRE_REC_TAMPER` with `AC_TAMPER_REASON_REMOTE_THREAD`. This is the terminal observable of SWHE-style injection, CreateRemoteThread, QueueUserAPC-into-a-worker, and most reflective-loader stubs.
+
+- **Handle-right stripping on process / thread opens.** `ObRegisterCallbacks` with altitude `L"320800.4210"` installs a pre-op callback on `PsProcessType` and `PsThreadType` for both `HANDLE_CREATE` and `HANDLE_DUPLICATE`. For every user-mode (`KernelHandle == 0`) cross-process open against a protected target, the callback masks out `PROCESS_TERMINATE | PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE | PROCESS_SET_INFORMATION | PROCESS_SUSPEND_RESUME` on process handles and `THREAD_TERMINATE | THREAD_SUSPEND_RESUME | THREAD_SET_CONTEXT | THREAD_SET_INFORMATION | THREAD_SET_THREAD_TOKEN | THREAD_IMPERSONATE | THREAD_DIRECT_IMPERSONATION` on thread handles, then emits `WIRE_REC_HANDLE_AUDIT` (original mask, stripped mask, caller image path, `WIRE_HANDLE_FLAG_THREAD` / `WIRE_HANDLE_FLAG_DUP`) and a paired `WIRE_REC_HOOK_AUDIT` with `Operation = HANDLE_STRIP`. The matching tamper reason is `AC_TAMPER_REASON_HANDLE_STRIP`. This is the kernel-side analogue of VGK's prefilter path — same decision, no detour.
+
+- **Parasite-DLL image load.** The existing user-image notify now routes a second pass through `hook_audit`. When the target PID is protected we evaluate the full image path against three independent signals: (1) does it live under `\Windows\System32\`, `\SysWOW64\`, `\WinSxS\`, `\Assembly\` or `\Microsoft.NET\`; (2) does it live under the game executable's own directory (captured on the matching user-image load that triggered the protected-PID registration); (3) does the filename carry a suspect substring (`hook`, `inject`, `overlay`, `cheat`, `aimbot`, `wallhack`, …) and is the file unsigned (`IMAGE_INFO_EX.ImageSignatureLevel == 0 && ImageSignatureType == 0`). Any image that fails system-backed and game-dir checks, or that is unsigned, or that matches a suspect substring, produces `WIRE_REC_HOOK_AUDIT` with `Operation = PARASITE_DLL`, the composed `DecisionFlags`, the full target path, and the loading PID — plus `AC_TAMPER_REASON_HOOK_INJECT`.
+
+The audit record mirrors the field set Vanguard's `VGK_WINDOWS_HOOK_AUDIT` carries — operation code, decision flags, caller image, target image, system time — but every field is derived from documented kernel calls. Nothing hooks `NtUser*`, nothing patches the SSDT, nothing writes to kernel code pages, and the stripping path is HVCI-safe.
+
+Protected PIDs are published by `game_integrity.c` whenever a user-image load matches the companion-registered path (`CHANNEL_BLOB_PROCESS`), and cleared on process exit from the shared `PsSetCreateProcessNotifyRoutineEx` sink. Both the thread notify and the object callback no-op when the PID is not in that set, so the hot path cost on normal system traffic is a single interlocked read.
+
 ---
 
 ## 8. Wire protocol
@@ -253,6 +272,8 @@ Payload types in this build:
 | `0x52` | `PIDDB_TAMPER` | `WIRE_PIDDB_TAMPER` |
 | `0x53` | `MMUNLOADED_TAMPER` | `WIRE_MMUNLOADED_TAMPER` |
 | `0x55` | `SIG_REJECT` | `WIRE_SIG_REJECT` |
+| `0x56` | `HOOK_AUDIT` | `WIRE_HOOK_AUDIT` |
+| `0x57` | `HANDLE_AUDIT` | `WIRE_HANDLE_AUDIT` |
 
 Tamper reason codes carried by `WIRE_TAMPER.Reason`:
 
@@ -265,6 +286,9 @@ Tamper reason codes carried by `WIRE_TAMPER.Reason`:
 | `0x1005` | `PIDDB`      | `PiDDBCacheTable` count/FNV drift |
 | `0x1006` | `MMUNLOADED` | `MmUnloadedDrivers` FNV drift |
 | `0x1007` | `INPUT`      | Input class service callback drift |
+| `0x1008` | `REMOTE_THREAD` | Cross-process thread create into protected game PID |
+| `0x1009` | `HOOK_INJECT`   | Parasite DLL load into protected game PID |
+| `0x100A` | `HANDLE_STRIP`  | Dangerous access rights stripped on cross-process open |
 
 User mode drains the ring by issuing `IOCTL_AC_EVENT_POLL` with an output buffer; the driver copies as many whole records as fit and returns the byte count via `IoStatus.Information`.
 

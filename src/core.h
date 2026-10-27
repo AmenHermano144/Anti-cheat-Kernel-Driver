@@ -3,6 +3,7 @@
 #include <ntifs.h>
 #include <ntddk.h>
 #include <wdm.h>
+#include <ntimage.h>
 #include <intrin.h>
 
 #define CORE_AC_POOL_TAG            'cAcA'

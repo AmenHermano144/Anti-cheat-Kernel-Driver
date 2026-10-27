@@ -21,7 +21,23 @@
 #define WIRE_REC_PIDDB_TAMPER   0x52
 #define WIRE_REC_MMUNLOADED_TAMPER 0x53
 #define WIRE_REC_SIG_REJECT     0x55
+#define WIRE_REC_HOOK_AUDIT     0x56
+#define WIRE_REC_HANDLE_AUDIT   0x57
 #define WIRE_REC_TEARDOWN       0x02
+
+#define WIRE_HOOK_OP_REMOTE_THREAD   1
+#define WIRE_HOOK_OP_PARASITE_DLL    2
+#define WIRE_HOOK_OP_HANDLE_STRIP    3
+
+#define WIRE_HOOK_FLAG_ALLOWED       0x0001
+#define WIRE_HOOK_FLAG_STRIPPED      0x0002
+#define WIRE_HOOK_FLAG_UNSIGNED      0x0004
+#define WIRE_HOOK_FLAG_FOREIGN_DIR   0x0008
+#define WIRE_HOOK_FLAG_NAME_MATCH    0x0010
+#define WIRE_HOOK_FLAG_CROSS_PROC    0x0020
+
+#define WIRE_HANDLE_FLAG_THREAD      0x0001
+#define WIRE_HANDLE_FLAG_DUP         0x0002
 
 #pragma pack(push, 1)
 typedef struct _WIRE_RECORD_HEADER
@@ -143,4 +159,32 @@ typedef struct _WIRE_SIG_REJECT
     USHORT  ImagePathLen;
     UCHAR   ImagePath[520];
 } WIRE_SIG_REJECT, *PWIRE_SIG_REJECT;
+
+typedef struct _WIRE_HOOK_AUDIT
+{
+    ULONG   Operation;
+    ULONG   DecisionFlags;
+    ULONG64 TargetProcessId;
+    ULONG64 CallerProcessId;
+    ULONG64 CallerThreadId;
+    ULONG64 SuspectAddress;
+    ULONG64 SystemTime;
+    USHORT  CallerImagePathLen;
+    UCHAR   CallerImagePath[520];
+    USHORT  TargetImagePathLen;
+    UCHAR   TargetImagePath[520];
+    UCHAR   TargetImageName[16];
+} WIRE_HOOK_AUDIT, *PWIRE_HOOK_AUDIT;
+
+typedef struct _WIRE_HANDLE_AUDIT
+{
+    ULONG64 CallerProcessId;
+    ULONG64 TargetProcessId;
+    ULONG   OriginalAccess;
+    ULONG   StrippedAccess;
+    ULONG   Flags;
+    ULONG   Reserved;
+    USHORT  CallerImagePathLen;
+    UCHAR   CallerImagePath[520];
+} WIRE_HANDLE_AUDIT, *PWIRE_HANDLE_AUDIT;
 #pragma pack(pop)

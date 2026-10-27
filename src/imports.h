@@ -91,20 +91,16 @@ NTKERNELAPI NTSTATUS NTAPI ObReferenceObjectByName(
 
 extern POBJECT_TYPE *IoDriverObjectType;
 
+NTKERNELAPI NTSTATUS NTAPI ObSetSecurityObjectByPointer(
+    PVOID                Object,
+    SECURITY_INFORMATION SecurityInformation,
+    PSECURITY_DESCRIPTOR SecurityDescriptor);
+
 typedef struct _SYSTEM_KERNEL_DEBUGGER_INFORMATION
 {
     BOOLEAN KernelDebuggerEnabled;
     BOOLEAN KernelDebuggerNotPresent;
 } SYSTEM_KERNEL_DEBUGGER_INFORMATION, *PSYSTEM_KERNEL_DEBUGGER_INFORMATION;
-
-typedef struct _SYSTEM_FIRMWARE_TABLE_INFORMATION
-{
-    ULONG ProviderSignature;
-    ULONG Action;
-    ULONG TableID;
-    ULONG TableBufferLength;
-    UCHAR TableBuffer[1];
-} SYSTEM_FIRMWARE_TABLE_INFORMATION, *PSYSTEM_FIRMWARE_TABLE_INFORMATION;
 
 #define CORE_FW_ACTION_ENUMERATE        0
 #define CORE_FW_ACTION_GET              1

@@ -15,6 +15,7 @@
 #include "exec_region_scan.h"
 #include "input_integrity.h"
 #include "tamper_rootkit.h"
+#include "hook_audit.h"
 
 CORE_AC_GLOBAL g_Core;
 
@@ -110,6 +111,9 @@ static VOID CoreDeferredInit(PVOID Context)
     (VOID)TamperRootkitInit();
     (VOID)TamperRootkitSnapshot();
 
+    (VOID)HookAuditInit();
+    (VOID)HookAuditRegisterCallbacks();
+
     status = CoreStartWorker();
     if (!NT_SUCCESS(status)) { CORE_LOG("StartWorker failed: 0x%08X", status); goto fail; }
 
@@ -119,6 +123,7 @@ static VOID CoreDeferredInit(PVOID Context)
 
 fail:
     InterlockedExchange(&g_Core.InitState, 3);
+    HookAuditUnregisterCallbacks();
     CoreUnregisterCallbacks();
 }
 
@@ -265,6 +270,7 @@ static VOID CoreImageLoadNotify(PUNICODE_STRING FullImageName, HANDLE ProcessId,
     else
     {
         (VOID)GameIntegrityOnUserImageLoad(ProcessId, FullImageName, ImageInfo);
+        (VOID)HookAuditOnUserImageLoad(ProcessId, FullImageName, ImageInfo);
     }
 }
 
@@ -278,6 +284,7 @@ static VOID CoreCreateProcessNotify(PEPROCESS Process, HANDLE ProcessId, PPS_CRE
     else
     {
         (VOID)Pml4UnregisterGameProcessByPid(ProcessId);
+        (VOID)GameIntegrityOnProcessExit(ProcessId);
         (VOID)EventsReportProcessExit(ProcessId);
     }
 }
@@ -371,10 +378,13 @@ VOID CoreDriverUnload(PDRIVER_OBJECT DriverObject)
 
     NmiWatchdogUnregister();
     CoreUnregisterCallbacks();
+    HookAuditUnregisterCallbacks();
     AcTamperDisarm();
+    HookAuditShutdown();
     TamperRootkitShutdown();
     InputIntegrityShutdown();
     ExecRegionScanShutdown();
+    GameIntegrityShutdown();
     Pml4ClearWatched();
     ChannelShutdown();
     EventsShutdown();

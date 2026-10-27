@@ -14,6 +14,8 @@
     <ProjectGuid>{A4F2E8D1-7B6C-4D2A-9E31-C7F109AC4D01}</ProjectGuid>
     <RootNamespace>Core_ac</RootNamespace>
     <ProjectName>Core_ac</ProjectName>
+    <TargetPlatformVersion>10.0.26100.0</TargetPlatformVersion>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
@@ -107,6 +109,7 @@
     <ClCompile Include="src\exec_region_scan.c" />
     <ClCompile Include="src\input_integrity.c" />
     <ClCompile Include="src\tamper_rootkit.c" />
+    <ClCompile Include="src\hook_audit.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\core.h" />
@@ -132,6 +135,7 @@
     <ClInclude Include="src\exec_region_scan.h" />
     <ClInclude Include="src\input_integrity.h" />
     <ClInclude Include="src\tamper_rootkit.h" />
+    <ClInclude Include="src\hook_audit.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

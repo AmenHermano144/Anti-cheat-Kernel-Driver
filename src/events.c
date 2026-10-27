@@ -139,3 +139,17 @@ NTSTATUS EventsReportSignatureReject(HANDLE processId, ULONG64 imageBase, NTSTAT
     }
     return ChannelEnqueueRecord(WIRE_REC_SIG_REJECT, &rec, sizeof(rec));
 }
+
+NTSTATUS EventsReportHookAudit(const WIRE_HOOK_AUDIT *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_HOOK_AUDIT, rec, sizeof(*rec));
+}
+
+NTSTATUS EventsReportHandleAudit(const WIRE_HANDLE_AUDIT *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_HANDLE_AUDIT, rec, sizeof(*rec));
+}
