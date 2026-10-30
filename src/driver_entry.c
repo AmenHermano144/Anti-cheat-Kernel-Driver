@@ -17,6 +17,7 @@
 #include "tamper_rootkit.h"
 #include "hook_audit.h"
 #include "overlay_detect.h"
+#include "dma_detect.h"
 
 CORE_AC_GLOBAL g_Core;
 
@@ -116,6 +117,9 @@ static VOID CoreDeferredInit(PVOID Context)
     (VOID)HookAuditRegisterCallbacks();
 
     (VOID)OverlayDetectInit();
+
+    (VOID)DmaDetectInit();
+    (VOID)DmaDetectSnapshot();
 
     status = CoreStartWorker();
     if (!NT_SUCCESS(status)) { CORE_LOG("StartWorker failed: 0x%08X", status); goto fail; }
@@ -351,6 +355,7 @@ static VOID CorePollWorker(PVOID Context)
             (VOID)ExecRegionScanDiff();
             (VOID)InputIntegrityVerify();
             (VOID)TamperRootkitVerify();
+            (VOID)DmaDetectVerify();
             (VOID)ChannelFlushPending();
         }
 
@@ -385,6 +390,7 @@ VOID CoreDriverUnload(PDRIVER_OBJECT DriverObject)
     CoreUnregisterCallbacks();
     HookAuditUnregisterCallbacks();
     AcTamperDisarm();
+    DmaDetectShutdown();
     OverlayDetectShutdown();
     HookAuditShutdown();
     TamperRootkitShutdown();

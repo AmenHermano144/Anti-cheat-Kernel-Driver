@@ -24,6 +24,7 @@
 #define WIRE_REC_HOOK_AUDIT     0x56
 #define WIRE_REC_HANDLE_AUDIT   0x57
 #define WIRE_REC_OVERLAY_DETECT 0x58
+#define WIRE_REC_DMA_HIT        0x59
 #define WIRE_REC_TEARDOWN       0x02
 
 #define WIRE_HOOK_OP_REMOTE_THREAD   1
@@ -203,4 +204,26 @@ typedef struct _WIRE_OVERLAY_DETECT
     WCHAR   ClassName[64];
     WCHAR   Title[128];
 } WIRE_OVERLAY_DETECT, *PWIRE_OVERLAY_DETECT;
+
+typedef struct _WIRE_DMA_HIT
+{
+    UCHAR   Bus;
+    UCHAR   Device;
+    UCHAR   Function;
+    UCHAR   HeaderType;
+    USHORT  VendorId;
+    USHORT  DeviceId;
+    USHORT  SubsysVendorId;
+    USHORT  SubsysDeviceId;
+    USHORT  Command;
+    USHORT  Status;
+    UCHAR   ClassCode;
+    UCHAR   SubClass;
+    UCHAR   ProgIf;
+    UCHAR   RevisionId;
+    ULONG   Bar[6];
+    ULONG   DetectFlags;
+    ULONG   Reserved;
+    ULONG64 SerialNumber;
+} WIRE_DMA_HIT, *PWIRE_DMA_HIT;
 #pragma pack(pop)

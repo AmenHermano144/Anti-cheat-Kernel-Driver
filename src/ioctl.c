@@ -6,6 +6,7 @@
 #include "hwid.h"
 #include "strings.h"
 #include "overlay_detect.h"
+#include "dma_detect.h"
 
 static NTSTATUS CompleteIrp(PIRP Irp, NTSTATUS Status, ULONG Info)
 {
@@ -114,6 +115,17 @@ static NTSTATUS HandleQueryOverlayFlag(PVOID buf, ULONG inLen, ULONG outLen, ULO
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS HandleQueryDmaFlag(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(inLen);
+    *written = 0;
+    if (!buf || outLen < sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
+    ULONG value = DmaDetectGetFlag();
+    RtlCopyMemory(buf, &value, sizeof(value));
+    *written = sizeof(value);
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS CoreIoctlDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     UNREFERENCED_PARAMETER(DeviceObject);
@@ -180,6 +192,9 @@ NTSTATUS CoreIoctlDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         break;
     case IOCTL_AC_QUERY_OVERLAY_FLAG:
         s = HandleQueryOverlayFlag(buf, inLen, outLen, &written);
+        break;
+    case IOCTL_AC_QUERY_DMA_FLAG:
+        s = HandleQueryDmaFlag(buf, inLen, outLen, &written);
         break;
     default:
         break;

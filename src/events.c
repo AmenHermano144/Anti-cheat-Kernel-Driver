@@ -160,3 +160,10 @@ NTSTATUS EventsReportOverlay(const WIRE_OVERLAY_DETECT *rec)
     if (!rec) return STATUS_INVALID_PARAMETER;
     return ChannelEnqueueRecord(WIRE_REC_OVERLAY_DETECT, rec, sizeof(*rec));
 }
+
+NTSTATUS EventsReportDma(const WIRE_DMA_HIT *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_DMA_HIT, rec, sizeof(*rec));
+}

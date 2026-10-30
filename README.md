@@ -79,6 +79,7 @@ Only `DriverEntry` runs synchronously. Device registration, callback installatio
 | `tamper_rootkit.{c,h}` | Pattern-resolves `PiDDBCacheTable` and `MmUnloadedDrivers`, snapshots counts + FNV, emits `PIDDB_TAMPER` / `MMUNLOADED_TAMPER` on silent mutation |
 | `hook_audit.{c,h}` | `PsSetCreateThreadNotifyRoutine` + `ObRegisterCallbacks` + user-image heuristic over protected game PIDs; emits `HOOK_AUDIT` / `HANDLE_AUDIT` for the `SetWindowsHookEx` / `SetProp[2]` abuse surface Vanguard captures through SSDT detours |
 | `overlay_detect.{c,h}` | Overlay detector: parses window extended-style flags pushed from the companion, walks the owner's parent chain (built from `PsSetCreateProcessNotifyRoutineEx`), checks for a whitelisted shell ancestor, matches cheat-style class names, and sets bits on a module-wide flag variable; emits `OVERLAY_DETECT` |
+| `dma_detect.{c,h}` | DMA-card detector: enumerates PCI config space via `HalGetBusDataByOffset`, fingerprints known DMA FPGA VID:DID (pcileech-fpga / Screamer / LeetDMA / Captain-DMA / ZDMA), walks the PCIe extended capability chain for a zeroed Device Serial Number, cross-checks against the `\Driver\pci` PDO list for hidden devices, and diffs each heartbeat scan against a boot baseline for hot-plug / header-type mutation; emits `DMA_HIT` |
 | `usermod.{c,h}` | User-mode module walker (PEB `InLoadOrderModuleList`) |
 | `strings.{c,h}` | Kernel-safe string primitives, FNV1a 32/64, memmem, hex formatter |
 | `core.h` | Shared types, pool tags, device names, status codes |
@@ -120,6 +121,7 @@ DriverEntry
         ├─ TamperRootkitInit + Snapshot        resolve + hash PiDDBCacheTable, MmUnloadedDrivers
         ├─ HookAuditInit + RegisterCallbacks   PsSetCreateThreadNotifyRoutine + ObRegisterCallbacks
         ├─ OverlayDetectInit()                 pid→parent map + overlay flag variable
+        ├─ DmaDetectInit + Snapshot            PCI config-space + \Driver\pci PDO baseline
         └─ CoreStartWorker()                   30 s heartbeat loop
 
 Heartbeat tick (every 30 s):
@@ -135,6 +137,7 @@ InputIntegrityVerify                  class service callback slot vs. snapshot
 TamperRootkitVerify                   PiDDBCacheTable / MmUnloadedDrivers mutation
                                       hook_audit records flow directly from the
                                       thread notify + ObReg pre-op + image-load path
+DmaDetectVerify                       full PCI config-space sweep + PDO diff vs. baseline
 ChannelFlushPending                   drain any deferred producers
 ```
 ```
@@ -266,6 +269,39 @@ The flag variable is the "set a bit when overlay seen" surface the detector expo
 | `0x0800` | `KNOWN_CLASS`       | Class name matched a cheat-overlay suffix |
 | `0x1000` | `SUSPICIOUS`        | Composite verdict — at least one of the suspicious conditions held |
 
+### 7.11 DMA-card detection (PCI config-space + PDO cross-check)
+
+`dma_detect.c` catches hardware DMA attack cards (pcileech-fpga / PCIeScreamer / LeetDMA / Captain-DMA / ZDMA and their derivatives) by sweeping the PCI config space the same way firmware does and matching several independent signals against each function:
+
+- **Enumeration.** `HalGetBusDataByOffset(PCIConfiguration, bus, slot, …)` reads the first 64 bytes of config for every function on every (bus, device) across the full 0–255 bus range. Function 0 is probed first; multi-function devices (header-type bit 7) are expanded to all eight functions. The scan runs at `PASSIVE_LEVEL` from the deferred init thread (baseline pass) and from the heartbeat worker (verify pass). On the baseline pass every reachable function is captured as `{Bus, Device, Function, HeaderType, VendorId, DeviceId, Flags}`; the subsequent verify passes diff against that snapshot.
+
+- **Fingerprint match.** A baked VID:DID list covers the canonical pcileech-fpga device identifiers (Xilinx `10EE:0007 / 0666 / 7011 / 7012 / 7014 / 7021 / 7022 / 7024 / 7028 / 7038 / 7A37 / 7D02 / 8011 / 8021 / 8024 / 8038 / 9011 / 9021 / 9024 / A011 / A021`, Altera `1172:E001 / 0004`, test VIDs `6666:6666 / 1234:1234`). An exact match sets `DMA_FLAG_KNOWN_DEVICE` and trips `DMA_FLAG_SUSPICIOUS` immediately — this is the smoking-gun case. A broader FPGA-vendor check (`10EE`, `1172`, `1204`, bogus VIDs) sets `DMA_FLAG_FPGA_VENDOR` as a secondary signal that only trips suspicious when combined with another anomaly below.
+
+- **PCIe Device Serial Number.** For non-bridge devices the detector walks the standard-capability list (ptr `0x34` for header type 0, `0x14` for CardBus), locates the PCI Express capability (`CapID = 0x10`), then walks the extended-capability list from `0x100` looking for the Device Serial Number cap (`ExtCapID = 0x0003`). Legitimate PCIe silicon populates the DSN with a vendor-assigned EUI-64. DMA cards that spoof real VID:DIDs frequently leave the DSN zeroed — on any FPGA-vendor or known-device hit with `SerialNumber == 0`, `DMA_FLAG_ZERO_SERIAL` is set. When the PCIe cap is missing entirely on an FPGA-vendor device, `DMA_FLAG_NO_CAPABILITIES` is set instead.
+
+- **PDO cross-check.** `\Driver\pci` is referenced through `ObReferenceObjectByName`, and every PDO on its `DeviceObject` chain is queried for `DevicePropertyBusNumber` and `DevicePropertyAddress`. A function visible to HAL config-space reads but absent from the pci.sys PDO list is the pattern a stealth DMA card produces when it attaches to a bus without allowing the enumerator to publish a device node — `DMA_FLAG_HIDDEN_PDO` is set on an FPGA-vendor or known-device hit under those conditions.
+
+- **Hot-plug and header mutation.** Every verify-pass function is matched against the baseline on `(Bus, Device, Function, VendorId, DeviceId)`. A new function appearing after boot sets `DMA_FLAG_HOTPLUG`; the same slot reporting a different header type sets `DMA_FLAG_HEADER_MISMATCH`. A hot-plugged function with bus-master-enable set in Command register and no PDO backing is tagged `DMA_FLAG_BUSMASTER_UNCLAIMED` — the terminal state of a card that just powered on, enabled DMA, and never allowed itself to be enumerated by PnP.
+
+- **Bridges.** Type-1 headers are read for `SecondaryBus` and `SubordinateBus`. A bridge whose subordinate falls below its secondary — a shape sometimes left behind by firmware that reroutes a captured bus — sets `DMA_FLAG_BRIDGE_ANOMALY`.
+
+- **Verdict.** A function is suspicious when any of (a) known-device match, (b) FPGA-vendor + any of `{ZERO_SERIAL, NO_CAPABILITIES, HIDDEN_PDO, HOTPLUG}`, (c) `HOTPLUG` + `HIDDEN_PDO`, (d) `BUSMASTER_UNCLAIMED`, or (e) `HEADER_MISMATCH` holds. On a suspicious hit the module `InterlockedOr`s the detect bitmap into module-wide `volatile LONG g_DmaFlag`, emits `WIRE_REC_DMA_HIT` (`Bus/Device/Function`, `HeaderType`, VID/DID/subsys, Command/Status, class triplet, BAR[0..5], DSN, `DetectFlags`), and routes a `WIRE_REC_TAMPER(AC_TAMPER_REASON_DMA)` carrying `(bus<<16)|(dev<<8)|fn` as locator.
+
+The flag variable is exposed outside the module the same way `g_OverlayFlag` is: user mode reads it with `IOCTL_AC_QUERY_DMA_FLAG`, other kernel modules call `DmaDetectGetFlag()` / `DmaDetectClearFlag()`. Detect-flag bits exposed in `dma_detect.h`:
+
+| Bit | Name | Meaning |
+|---:|---|---|
+| `0x0001` | `KNOWN_DEVICE`        | VID:DID matched the baked DMA-card fingerprint list |
+| `0x0002` | `FPGA_VENDOR`         | Vendor id is a known FPGA silicon vendor (Xilinx, Altera, Lattice, bogus test VID) |
+| `0x0004` | `ZERO_SERIAL`         | PCIe Device Serial Number capability present but EUI-64 is zero |
+| `0x0008` | `NO_CAPABILITIES`     | Status says capabilities present but the cap list did not surface the PCIe cap |
+| `0x0010` | `HIDDEN_PDO`          | Function visible in PCI config space but no PDO under `\Driver\pci` |
+| `0x0020` | `HOTPLUG`             | Function appeared on a slot that was empty at boot baseline |
+| `0x0040` | `BUSMASTER_UNCLAIMED` | Hot-plugged function with bus-master-enable and no PDO backing |
+| `0x0080` | `BRIDGE_ANOMALY`      | Bridge with `SubordinateBus < SecondaryBus` |
+| `0x0100` | `HEADER_MISMATCH`     | Header type changed between baseline and verify on the same slot |
+| `0x1000` | `SUSPICIOUS`          | Composite verdict — at least one of the suspicious conditions held |
+
 ---
 
 ## 8. Wire protocol
@@ -309,6 +345,7 @@ Payload types in this build:
 | `0x56` | `HOOK_AUDIT` | `WIRE_HOOK_AUDIT` |
 | `0x57` | `HANDLE_AUDIT` | `WIRE_HANDLE_AUDIT` |
 | `0x58` | `OVERLAY_DETECT` | `WIRE_OVERLAY_DETECT` |
+| `0x59` | `DMA_HIT` | `WIRE_DMA_HIT` |
 
 Tamper reason codes carried by `WIRE_TAMPER.Reason`:
 
@@ -325,6 +362,7 @@ Tamper reason codes carried by `WIRE_TAMPER.Reason`:
 | `0x1009` | `HOOK_INJECT`   | Parasite DLL load into protected game PID |
 | `0x100A` | `HANDLE_STRIP`  | Dangerous access rights stripped on cross-process open |
 | `0x100B` | `OVERLAY`       | Overlay-shaped window owned by an untrusted process lineage |
+| `0x100C` | `DMA`           | PCI device matched a known DMA fingerprint, zeroed DSN, hidden PDO, or hot-plugged with bus-master |
 
 User mode drains the ring by issuing `IOCTL_AC_EVENT_POLL` with an output buffer; the driver copies as many whole records as fit and returns the byte count via `IoStatus.Information`.
 
@@ -351,6 +389,7 @@ User mode drains the ring by issuing `IOCTL_AC_EVENT_POLL` with an output buffer
 | `0x80F` | `IOCTL_AC_PUSH_CMD` | blob in | Companion → driver command |
 | `0x810` | `IOCTL_AC_REPORT_WINDOW` | `OVERLAY_WINDOW_REPORT` in | Push one window's PID/HWND/style/ex-style/class/title for overlay evaluation |
 | `0x811` | `IOCTL_AC_QUERY_OVERLAY_FLAG` | 4 B out | Read the current `g_OverlayFlag` bitmap |
+| `0x812` | `IOCTL_AC_QUERY_DMA_FLAG`     | 4 B out | Read the current `g_DmaFlag` bitmap |
 
 Blob slots are keyed by `CHANNEL_BLOB_KIND`, replaced in place on a repeat push, and read back by subsystems via `ChannelGetBlob` or the suffix-match helper `ChannelBlobEqualsW`.
 

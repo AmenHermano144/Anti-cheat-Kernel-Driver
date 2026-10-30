@@ -18,9 +18,12 @@ z:\!nimrodcore\drivers\sources\faceit\ac_driver\build\obj\release\ioctl.obj
 z:\!nimrodcore\drivers\sources\faceit\ac_driver\build\obj\release\env_checks.obj
 z:\!nimrodcore\drivers\sources\faceit\ac_driver\build\obj\release\nmi_watchdog.obj
 z:\!nimrodcore\drivers\sources\faceit\ac_driver\build\obj\release\anti_tamper.obj
+z:\!nimrodcore\drivers\sources\faceit\ac_driver\build\obj\release\driver_entry.obj
 z:\!nimrodcore\drivers\sources\faceit\ac_driver\build\obj\release\tamper_rootkit.obj
 z:\!nimrodcore\drivers\sources\faceit\ac_driver\build\obj\release\input_integrity.obj
-z:\!nimrodcore\drivers\sources\faceit\ac_driver\build\obj\release\driver_entry.obj
+z:\!nimrodcore\drivers\sources\faceit\ac_driver\build\obj\release\overlay_detect.obj
+z:\!nimrodcore\drivers\sources\faceit\ac_driver\build\obj\release\hook_audit.obj
+z:\!nimrodcore\drivers\sources\faceit\ac_driver\build\obj\release\dma_detect.obj
 z:\!nimrodcore\drivers\sources\faceit\ac_driver\build\release\core_ac.sys
 z:\!nimrodcore\drivers\sources\faceit\ac_driver\build\release\core_ac.pdb
 z:\!nimrodcore\drivers\sources\faceit\ac_driver\build\obj\release\core_ac.tlog\cl.command.1.tlog

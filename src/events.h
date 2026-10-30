@@ -20,3 +20,4 @@ NTSTATUS EventsReportSignatureReject(HANDLE processId, ULONG64 imageBase, NTSTAT
 NTSTATUS EventsReportHookAudit(const WIRE_HOOK_AUDIT *rec);
 NTSTATUS EventsReportHandleAudit(const WIRE_HANDLE_AUDIT *rec);
 NTSTATUS EventsReportOverlay(const WIRE_OVERLAY_DETECT *rec);
+NTSTATUS EventsReportDma(const WIRE_DMA_HIT *rec);

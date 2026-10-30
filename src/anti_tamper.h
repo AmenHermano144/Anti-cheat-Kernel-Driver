@@ -27,3 +27,4 @@ BOOLEAN  AcTamperDrainNmiFlags(ULONG *outReason, ULONG64 *outObserved);
 #define AC_TAMPER_REASON_HOOK_INJECT    0x1009
 #define AC_TAMPER_REASON_HANDLE_STRIP   0x100A
 #define AC_TAMPER_REASON_OVERLAY        0x100B
+#define AC_TAMPER_REASON_DMA            0x100C

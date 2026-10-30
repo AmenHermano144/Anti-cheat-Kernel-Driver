@@ -22,3 +22,4 @@ Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\input_integrity.c;Z:\!NIMROD
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\tamper_rootkit.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\tamper_rootkit.obj
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\hook_audit.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\hook_audit.obj
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\overlay_detect.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\overlay_detect.obj
+Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\dma_detect.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\dma_detect.obj
