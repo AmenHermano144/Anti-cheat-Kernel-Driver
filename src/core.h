@@ -14,6 +14,8 @@
 #define CORE_AC_POOL_TAG_INTG       'iIcA'
 #define CORE_AC_POOL_TAG_PML        'lPcA'
 #define CORE_AC_POOL_TAG_CHAN       'bCcA'
+#define CORE_AC_POOL_TAG_PW         'wPcA'
+#define CORE_AC_POOL_TAG_IMG        'gIcA'
 
 #define CORE_AC_DEVICE_NAME         L"\\Device\\CoreAC"
 #define CORE_AC_DOSDEVICE_NAME      L"\\??\\CoreAC"

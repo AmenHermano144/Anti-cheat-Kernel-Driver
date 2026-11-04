@@ -112,6 +112,8 @@
     <ClCompile Include="src\hook_audit.c" />
     <ClCompile Include="src\overlay_detect.c" />
     <ClCompile Include="src\dma_detect.c" />
+    <ClCompile Include="src\page_walker.c" />
+    <ClCompile Include="src\image_backing.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\core.h" />
@@ -140,6 +142,8 @@
     <ClInclude Include="src\hook_audit.h" />
     <ClInclude Include="src\overlay_detect.h" />
     <ClInclude Include="src\dma_detect.h" />
+    <ClInclude Include="src\page_walker.h" />
+    <ClInclude Include="src\image_backing.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

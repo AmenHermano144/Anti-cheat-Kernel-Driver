@@ -18,6 +18,7 @@
 #include "hook_audit.h"
 #include "overlay_detect.h"
 #include "dma_detect.h"
+#include "image_backing.h"
 
 CORE_AC_GLOBAL g_Core;
 
@@ -120,6 +121,9 @@ static VOID CoreDeferredInit(PVOID Context)
 
     (VOID)DmaDetectInit();
     (VOID)DmaDetectSnapshot();
+
+    (VOID)ImageBackingInit();
+    (VOID)ImageBackingBaseline();
 
     status = CoreStartWorker();
     if (!NT_SUCCESS(status)) { CORE_LOG("StartWorker failed: 0x%08X", status); goto fail; }
@@ -273,6 +277,7 @@ static VOID CoreImageLoadNotify(PUNICODE_STRING FullImageName, HANDLE ProcessId,
     {
         (VOID)ByovdScannerOnImageLoad(FullImageName, ImageInfo);
         (VOID)KldrOnKernelImageLoad(FullImageName, ImageInfo);
+        (VOID)ImageBackingOnKernelImageLoad(FullImageName, ImageInfo);
     }
     else
     {
@@ -356,6 +361,7 @@ static VOID CorePollWorker(PVOID Context)
             (VOID)InputIntegrityVerify();
             (VOID)TamperRootkitVerify();
             (VOID)DmaDetectVerify();
+            (VOID)ImageBackingVerify();
             (VOID)ChannelFlushPending();
         }
 
@@ -390,6 +396,7 @@ VOID CoreDriverUnload(PDRIVER_OBJECT DriverObject)
     CoreUnregisterCallbacks();
     HookAuditUnregisterCallbacks();
     AcTamperDisarm();
+    ImageBackingShutdown();
     DmaDetectShutdown();
     OverlayDetectShutdown();
     HookAuditShutdown();

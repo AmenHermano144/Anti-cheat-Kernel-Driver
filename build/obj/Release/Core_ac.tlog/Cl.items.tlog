@@ -23,3 +23,5 @@ Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\tamper_rootkit.c;Z:\!NIMRODC
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\hook_audit.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\hook_audit.obj
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\overlay_detect.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\overlay_detect.obj
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\dma_detect.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\dma_detect.obj
+Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\page_walker.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\page_walker.obj
+Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\image_backing.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\image_backing.obj

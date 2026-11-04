@@ -25,7 +25,20 @@
 #define WIRE_REC_HANDLE_AUDIT   0x57
 #define WIRE_REC_OVERLAY_DETECT 0x58
 #define WIRE_REC_DMA_HIT        0x59
+#define WIRE_REC_PAGE_WALK_ANOMALY 0x5A
 #define WIRE_REC_TEARDOWN       0x02
+
+#define PW_ANOM_PARSE_FAIL        0x00000001
+#define PW_ANOM_RWX               0x00000002
+#define PW_ANOM_WRITABLE_TEXT     0x00000004
+#define PW_ANOM_NX_CLEARED_TEXT   0x00000008
+#define PW_ANOM_HASH_DRIFT        0x00000010
+#define PW_ANOM_TEXT_MISSING      0x00000020
+#define PW_ANOM_LARGE_PAGE        0x00000040
+#define PW_ANOM_HOLE_RATIO_HIGH   0x00000080
+#define PW_ANOM_SECTION_SHRUNK    0x00000100
+#define PW_ANOM_RACE_OR_UNMAPPED  0x00000200
+#define PW_ANOM_NEW_MODULE        0x00000400
 
 #define WIRE_HOOK_OP_REMOTE_THREAD   1
 #define WIRE_HOOK_OP_PARASITE_DLL    2
@@ -226,4 +239,28 @@ typedef struct _WIRE_DMA_HIT
     ULONG   Reserved;
     ULONG64 SerialNumber;
 } WIRE_DMA_HIT, *PWIRE_DMA_HIT;
+
+typedef struct _WIRE_PAGE_WALK_ANOMALY
+{
+    ULONG64 ImageBase;
+    ULONG64 ImageSize;
+    ULONG64 DirectoryTableBase;
+    ULONG64 Fnv1a64Path;
+    ULONG   Flags;
+    ULONG   Granules;
+    ULONG   Present4k;
+    ULONG   Present2m;
+    ULONG   Present1g;
+    ULONG   NotPresent;
+    ULONG   Unreadable;
+    ULONG   CopyFailed;
+    ULONG   RwxPages;
+    ULONG   WritableTextPages;
+    ULONG   NxClearedTextPages;
+    ULONG   MissingTextPages;
+    UCHAR   TextHashBaseline[32];
+    UCHAR   TextHashObserved[32];
+    USHORT  ImagePathLen;
+    UCHAR   ImagePath[520];
+} WIRE_PAGE_WALK_ANOMALY, *PWIRE_PAGE_WALK_ANOMALY;
 #pragma pack(pop)

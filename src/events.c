@@ -167,3 +167,10 @@ NTSTATUS EventsReportDma(const WIRE_DMA_HIT *rec)
     if (!rec) return STATUS_INVALID_PARAMETER;
     return ChannelEnqueueRecord(WIRE_REC_DMA_HIT, rec, sizeof(*rec));
 }
+
+NTSTATUS EventsReportPageWalkAnomaly(const WIRE_PAGE_WALK_ANOMALY *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_PAGE_WALK_ANOMALY, rec, sizeof(*rec));
+}
