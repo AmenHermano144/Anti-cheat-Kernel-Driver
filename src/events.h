@@ -25,3 +25,8 @@ NTSTATUS EventsReportPageWalkAnomaly(const WIRE_PAGE_WALK_ANOMALY *rec);
 NTSTATUS EventsReportWin32kHook(const WIRE_WIN32K_HOOK *rec);
 NTSTATUS EventsReportMousePolling(const WIRE_MOUSE_POLLING *rec);
 NTSTATUS EventsReportSecureBootReport(const WIRE_SECUREBOOT_REPORT *rec);
+NTSTATUS EventsReportHvciReport(const WIRE_HVCI_REPORT *rec);
+NTSTATUS EventsReportOsVersionReport(const WIRE_OS_VERSION_REPORT *rec);
+NTSTATUS EventsReportVbsReport(const WIRE_VBS_REPORT *rec);
+NTSTATUS EventsReportIommuReport(const WIRE_IOMMU_REPORT *rec);
+NTSTATUS EventsReportTpmAttest(const WIRE_TPM_ATTEST_REPORT *rec);

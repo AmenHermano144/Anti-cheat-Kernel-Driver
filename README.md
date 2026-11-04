@@ -32,7 +32,7 @@ flowchart TB
     DEV["IoCreateDevice<br/>\\Device\\CoreAC + CoreAC_EVT<br/>DACL: SYSTEM + Admins"]:::passive
     SVC["ChannelInit · CryptoInit · EventsInit<br/>AcTamperArm (LSTAR) · NmiWatchdogRegister"]:::passive
     NTF["PsSetLoadImageNotifyRoutineEx<br/>PsSetCreateProcessNotifyRoutineEx"]:::passive
-    SNAP["KldrSnapshotModules · Pml4InitSnapshot<br/>ExecRegionScanSnapshot · InputIntegritySnapshot<br/>TamperRootkitSnapshot · HookAuditInit<br/>OverlayDetectInit · DmaDetectSnapshot<br/>ImageBackingBaseline (page-walker)<br/>SecureBootAttestBaseline (TPM PCR[0/7/14])"]:::passive
+    SNAP["KldrSnapshotModules · Pml4InitSnapshot<br/>ExecRegionScanSnapshot · InputIntegritySnapshot<br/>TamperRootkitSnapshot · HookAuditInit<br/>OverlayDetectInit · DmaDetectSnapshot<br/>ImageBackingBaseline (page-walker)<br/>SecureBootAttestBaseline (TPM PCR[0/7/14])<br/>HvciRequireBaseline (CI options · hypervisor)<br/>OsVersionGateBaseline (RtlGetVersion + UBR)<br/>VbsRequireBaseline (IUM flag · hv · DG)<br/>IommuRequireBaseline (DmaProtection + ACPI)<br/>TpmAttestBaseline (EK ReadPublic + caps + bundle)"]:::passive
 
     WORKER["CorePollWorker<br/>30 s heartbeat loop"]:::hot
     RING[("SPSC wire ring<br/>IOCTL_AC_EVENT_POLL")]:::sink
@@ -67,7 +67,7 @@ Only `DriverEntry` runs synchronously. Device registration, callback installatio
 | `pml4_scan.{c,h}` | Physical PML4 walker via `MmCopyMemory(MM_COPY_MEMORY_PHYSICAL)`; snapshots system CR3 and up to 8 user-registered game CR3s |
 | `physmem.{c,h}` | Physical-memory read helper |
 | `smbios.{c,h}` | SMBIOS table parse (BIOS, system, baseboard, memory) via `ZwQuerySystemInformation(RSMB)` |
-| `hwid.{c,h}` | SMBIOS roll-up, ACPI enumeration, composite SHA-256 digest |
+| `hwid.{c,h}` | Multi-source hardware fingerprint for backend bans: SMBIOS (BIOS / system / baseboard / UUID / memory), CPU (`CPUID` vendor + brand + signature + feature bitmaps + addressing bits + microcode revision from `MSR_IA32_BIOS_SIGN_ID`), GPU + NIC (PCI config-space enumeration with class-code filtering via `HalGetBusDataByOffset`), monitor EDID (per-display registry walk under `\Registry\Machine\SYSTEM\CurrentControlSet\Enum\DISPLAY\…\Device Parameters\EDID`), TPM EK public-key SHA-256 (folded in from `tpm_attest` after it baselines), ACPI table enumeration; emits `WIRE_HWID_HELLO` for the compact SMBIOS roll-up and `WIRE_HWID_EXTENDED` for the full fingerprint bundle, with a composite SHA-256 + FNV1a64 over everything |
 | `game_integrity.{c,h}` | Per-image load PE validation, threads `CiValidateFileObject` when available, binds PID to PML4 watcher on matched process load |
 | `exec_region_scan.{c,h}` | `SystemBigPoolInformation` sweep; emits `UNBACKED_EXEC` for non-paged allocations ≥ 256 B that fall outside any known kernel module |
 | `input_integrity.{c,h}` | Snapshots `MouClass`/`KbdClass` service-callback slots inside the upper filter's `DeviceExtension`; emits `INPUT_HIJACK` on drift |
@@ -80,6 +80,11 @@ Only `DriverEntry` runs synchronously. Device registration, callback installatio
 | `win32k_guard.{c,h}` | Session-space inline-hook detector for `win32kbase!SynthesizeMouseInput`: attaches to a GUI session process (winlogon / explorer) so win32k is addressable, pattern-locates the function, hashes a 256-byte sample via `page_walker`, diffs each heartbeat; also flags a jmp-shaped prologue (`E9 ??`, `FF 25`, `mov rax, imm64; jmp rax`); emits `WIN32K_HOOK` |
 | `mouse_polling.{c,h}` | Passive polling-statistics detector inspired by Vanguard's anti-Macku / anti-KMBox check: a 1 ms `KTIMER` + DPC samples each `MouClass` device's `DeviceExtension.WritePointer` without hooking anything, derives per-packet Δt, rolls a 100-sample window, and computes σ, burst rate (Δt < 0.5 ms), instant Hz, and max-packets-per-tick; emits `MOUSE_POLLING` with verdict `WAITING` / `NATURAL` / `SUSPICIOUS` / `INJECTION` |
 | `secureboot_attest.{c,h}` | Secure Boot ↔ TPM PCR cross-check (concept reversed from FACEIT / VGK): reads the `SecureBoot` and `SetupMode` EFI variables (`EFI_GLOBAL_VARIABLE_GUID`), `SystemSecureBootInformation` (class `0x91`), the `UEFISecureBootEnabled` registry value, and submits `TPM2_PCR_Read` against `\Device\TPM` (falling back to `\Device\TCM`) for PCR[0] (CRTM / firmware), PCR[7] (Secure Boot policy — PK/KEK/db/dbx), and PCR[14] (boot authority / CustomKernelSigners); fails closed when no TPM is addressable, exposes each software claim independently so disagreements are themselves a signal, re-reads PCR[7] at every heartbeat to catch runtime TPM-answer drift, and emits `WIRE_REC_SECUREBOOT_REPORT` with the full set of flags, state and raw SHA-256 digests |
+| `hvci_require.{c,h}` | HVCI / Core Isolation requirement check: queries `SystemCodeIntegrityInformation` (class `103`) for the live `CodeIntegrityOptions` bitmap, probes `CPUID.1:ECX[31]` + leaf `0x40000000` for hypervisor presence and vendor id (`Microsoft Hv` vs anything else), reads the `DeviceGuard\EnableVirtualizationBasedSecurity` + `DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity\Enabled` registry DWORDs, cross-checks the layers, classifies into `UNSUPPORTED` / `AVAILABLE_OFF` / `AUDIT_ONLY` / `ENFORCING` / `STRICT` / `TEST_SIGNING`, and emits `WIRE_REC_HVCI_REPORT` + `WIRE_REC_TAMPER(AC_TAMPER_REASON_HVCI)` when HVCI is not actually enforcing or when the state drifts at runtime |
+| `os_version_gate.{c,h}` | Advisory Windows build gate (informational, not enforcing): calls `RtlGetVersion` and reads `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\UBR` to capture major/minor/build/UBR/product-type/suite, classifies against a minimum build (default `26200` for Windows 11 25H2), emits `WIRE_REC_OS_VERSION` with full version metadata and a flag bitmap the backend can use to soft-kick or audit; never raises tamper on its own |
+| `vbs_require.{c,h}` | VBS / VSM (Virtualization-Based Security — the secure kernel) requirement: `SystemIsolatedUserModeInformation` (class `165`) for the first flag byte that indicates secure kernel running + HVCI running + firmware page protection + encryption key availability, CPUID hypervisor probe for presence + vendor, `DeviceGuard\EnableVirtualizationBasedSecurity` + `RequirePlatformSecurityFeatures` + LSA `LsaCfgFlags` registry, cross-check for policy-vs-live disagreement, classify into `UNSUPPORTED` / `AVAILABLE_OFF` / `ENABLED` / `STRICT`, runtime drift on the IUM flag byte; emits `WIRE_REC_VBS_REPORT` + `TAMPER(VBS)` when the secure kernel is not running |
+| `iommu_require.{c,h}` | IOMMU / Kernel DMA Protection requirement: `SystemDmaProtectionInformation` (class `141`) for `{ DmaProtectionsAvailable, DmaProtectionsInUse }`, cross-check against `DeviceGuard\Scenarios\KernelDmaProtection\Enabled` and `DmaSecurity\AllowBootDMA`, probes ACPI firmware tables for `DMAR` (Intel VT-d) and `IVRS` (AMD-Vi) via `SystemFirmwareTableInformation`, classifies into `UNSUPPORTED` / `AVAILABLE_OFF` / `IN_USE`, runtime drift on the live state; emits `WIRE_REC_IOMMU_REPORT` + `TAMPER(IOMMU)` when Kernel DMA Protection is not in use |
+| `tpm_attest.{c,h}` | TPM 2.0 attestation: opens `\Device\TPM` (falls back to `\Device\TCM`), submits `TPM2_GetCapability(TPM_CAP_TPM_PROPERTIES)` for manufacturer + vendor-string + firmware-version-1/2 via per-property round-trips, submits `TPM2_ReadPublic(0x81010001)` to extract the RSA-2048 EK's `TPM2B_PUBLIC` + `TPM2B_NAME`, hashes the public area with SHA-256 for a stable TPM identity, accepts a 32-byte companion-pushed challenge nonce via `IOCTL_AC_PUSH_TPM_NONCE`, pulls the current PCR[0]/PCR[7]/PCR[14] digests from `secureboot_attest`'s report, and produces a composite `BundleSha256 = SHA-256(nonce || EK_name || EK_public_hash || PCR[0] || PCR[7] || PCR[14])` that the backend verifies as a (nonce-bound, replay-safe) attestation; emits `WIRE_REC_TPM_ATTEST` + `TAMPER(TPM_ATTEST)` on EK drift between boot and heartbeat |
 | `usermod.{c,h}` | User-mode module walker (PEB `InLoadOrderModuleList`) |
 | `strings.{c,h}` | Kernel-safe string primitives, FNV1a 32/64, memmem, hex formatter |
 | `core.h` | Shared types, pool tags, device names, status codes |
@@ -126,6 +131,12 @@ DriverEntry
         ├─ Win32kGuardInit + Baseline          win32kbase!SynthesizeMouseInput prolog hash
         ├─ MousePollingInit + DiscoverDevices  mouclass write-pointer snapshot, start 1 ms DPC
         ├─ SecureBootAttestInit + Baseline     EFI/sysinfo/registry/TPM collect, PCR[0/7/14] snapshot
+        ├─ HvciRequireInit + Baseline          CI options · CPUID hv · DeviceGuard registry collect
+        ├─ OsVersionGateInit + Baseline        RtlGetVersion + UBR (advisory, flag only)
+        ├─ VbsRequireInit + Baseline           SystemIsolatedUserModeInformation + CPUID hv + DG reg
+        ├─ IommuRequireInit + Baseline         SystemDmaProtectionInformation + ACPI DMAR/IVRS + KDP reg
+        ├─ TpmAttestInit + Baseline            TPM2_GetCapability + TPM2_ReadPublic(EK) + PCR fold + bundle
+        ├─ HwidRefreshTpmBinding               fold TPM EK hash into HWID composite, re-emit extended
         └─ CoreStartWorker()                   30 s heartbeat loop
 ```
 
@@ -153,13 +164,18 @@ flowchart LR
     W32K["Win32kGuardVerify<br/>SMI prolog hash + jmp detect"]:::det
     MPV["MousePollingVerify<br/>jitter window · σ · burst rate"]:::det
     SB["SecureBootAttestVerify<br/>EFI/sysinfo/reg + PCR[7] drift"]:::det
+    HV["HvciRequireVerify<br/>CI options · hypervisor · DG reg"]:::det
+    OSG["OsVersionGateVerify<br/>build / UBR drift (advisory)"]:::det
+    VBS["VbsRequireVerify<br/>IUM flag byte · hv vendor · DG reg"]:::det
+    IOM["IommuRequireVerify<br/>DmaProtectionsInUse · ACPI · KDP reg"]:::det
+    TPM["TpmAttestVerify<br/>EK public hash · bundle nonce+PCRs"]:::det
     HA["hook_audit (async)<br/>thread notify · ObReg · image load"]:::det
     MPD["mouse_polling DPC (1 ms)<br/>passive WritePointer sampling"]:::det
     FLUSH["ChannelFlushPending"]:::det
 
     RING[("SPSC wire ring")]:::ring
 
-    T --> NMI1 --> NMI2 --> HB --> PML --> KL --> EX --> IN --> TR --> DMA --> PW --> W32K --> MPV --> SB --> FLUSH
+    T --> NMI1 --> NMI2 --> HB --> PML --> KL --> EX --> IN --> TR --> DMA --> PW --> W32K --> MPV --> SB --> HV --> OSG --> VBS --> IOM --> TPM --> FLUSH
     MPD -.updates window-.-> MPV
     HA -.-> RING
     NMI2 -.-> RING
@@ -174,6 +190,11 @@ flowchart LR
     W32K -.win32k hook.-> RING
     MPV -.polling verdict.-> RING
     SB -.secureboot mismatch.-> RING
+    HV -.hvci off / drift.-> RING
+    OSG -.build / ubr drift.-> RING
+    VBS -.vbs off / ium drift.-> RING
+    IOM -.kdp off / state drift.-> RING
+    TPM -.ek drift / bundle.-> RING
 ```
 
 ---
@@ -218,9 +239,27 @@ Reads the current CR3-pointed PML4 page via `MmCopyMemory` with `MM_COPY_MEMORY_
 
 ### 7.3 HWID collection
 
-Through `ZwQuerySystemInformation(SystemFirmwareTableInformation)` using the `'RSMB'` provider. The parser walks SMBIOS entry types 0, 1, 2, and 17 to extract BIOS vendor, system manufacturer, product, baseboard serial, system UUID, and memory module count. The ACPI enumerator runs best-effort — VBS/HVCI systems may return `STATUS_NOT_IMPLEMENTED`, which the caller tolerates.
+The HWID module exists to give the backend something strong to ban against — not one serial that can be flashed over, but a multi-source fingerprint that survives spoofing of any single layer. It runs at boot through a single `HwidCollectBoot` pass (at `PASSIVE_LEVEL` from the deferred-init worker) and emits two records: the compact `WIRE_HWID_HELLO` (BIOS vendor, system manufacturer / product, baseboard serial, system UUID, RAM module count) and the full `WIRE_HWID_EXTENDED` with everything below. Both are hashed together into a composite SHA-256 + FNV1a64 for easy backend-side joins.
 
-A composite digest (SHA-256 over the parsed structure) is cached and emitted as `WIRE_REC_HWID_HELLO`.
+Sources:
+
+- **SMBIOS roll-up.** `ZwQuerySystemInformation(SystemFirmwareTableInformation)` with provider `'RSMB'` → parser walks types 0 (BIOS), 1 (system), 2 (baseboard), and 17 (memory device) to extract vendor / product / UUID / serial / module count. BIOS-flashed spoofers can lie here, which is why it is folded in alongside the other sources rather than used alone.
+- **CPU fingerprint.** CPUID sequence captures the stable identity bits that survive any software spoofer short of a hypervisor doing CPUID interception: vendor string from leaf 0, full brand string from `0x80000002..0x80000004`, signature (family/model/stepping) from leaf 1 EAX, feature bitmaps from leaf 1 ECX/EDX and leaf 7 EBX/ECX, logical processor count from leaf 1 EBX bits 16..23, physical addressing bits from `0x80000008` EAX. The **microcode revision** comes from `MSR_IA32_BIOS_SIGN_ID (0x8B)` under `__try/__except` so a filtered MSR read does not crash the driver; a non-zero microcode revision binds the fingerprint to the exact µcode patch running on the CPU. Microcode updates after a ban are visible as a mutation of the composite digest, which is by design — a backend doing CPU-side bans usually wants to re-verify after µcode roll-outs.
+- **GPU + NIC PCI enumeration.** Full 0–255 bus scan via `HalGetBusDataByOffset(PCIConfiguration, …)`. For each `(bus, device, function)` whose vendor ≠ `0xFFFF`, the first 64 bytes of config space are captured and filtered by class code: `0x03` (display) → `Gpus[]` (up to 4), `0x02` (network) → `Nics[]` (up to 8). Each entry records VID / DID / subsys VID / subsys DID / class / subclass / prog-if / revision / BDF. This is the same primitive `dma_detect` uses, just projected onto a different class filter.
+- **Monitor EDID.** Per-display registry walk under `\Registry\Machine\SYSTEM\CurrentControlSet\Enum\DISPLAY\<ManufacturerCode>\<Instance>\Device Parameters\EDID`. Each 128-byte EDID (manufacturer code, product code, serial, manufacture week/year, preferred timings) is kept verbatim plus SHA-256'd; the `InstanceId` from the registry path is kept as a stable identifier even when the EDID itself is parasitized (some docks and KVM switches rewrite it). Up to 4 monitors.
+- **TPM EK.** The SHA-256 of the RSA-2048 EK's `TPM2B_PUBLIC` (handle `0x81010001`) is folded in from `tpm_attest`'s report after it baselines (see §7.19). This is the strongest single bit in the whole fingerprint — the EK is burned into the TPM silicon at manufacture, cannot be rewritten, and uniquely identifies the TPM part. Combined with manufacturer-cert chain verification, it is an identity the user cannot spoof without physically swapping the TPM.
+- **ACPI table enumeration.** Best-effort `SystemFirmwareTableInformation` enumeration — VBS/HVCI systems may return `STATUS_NOT_IMPLEMENTED`, which the caller tolerates. Used to seed the §7.18 DMAR/IVRS presence check as a side effect.
+
+**Composite digest.** After every collection pass (boot, and again after the TPM-binding refresh), the SMBIOS + extended fingerprint buffers are concatenated and SHA-256'd into `CompositeDigest` and FNV1a64'd into `CompositeFnv64`. These are what the backend hashes to decide ban-list membership. Any single-layer spoof changes one of the sub-fields; the composite moves, and the ban joins by hash.
+
+**Why the TPM EK fold happens post-baseline.** HWID collection runs early (before any attestation modules), because the heavy wire records and SMBIOS enumeration need to be ready for the backend before telemetry starts. The TPM EK is read later by `tpm_attest` (§7.19) because it requires `TPM2_ReadPublic` and the full command/response plumbing. `HwidRefreshTpmBinding` is called after `TpmAttestBaseline` returns: it pulls the EK hash from the TPM module's report, writes it into the extended fingerprint, re-computes the composite, and re-emits `WIRE_HWID_EXTENDED`. Backends see both records — the first with `TpmEkPresent = 0`, the second with the real TPM binding — and keep the latter.
+
+**What this does and doesn't ban.**
+
+- Changing RAM, adding a GPU, swapping an NVMe: the SMBIOS roll-up changes partially, the composite moves. Backend-side policy decides whether to re-ban or re-provision.
+- BIOS-flashed spoofer that rewrites UUID, baseboard serial, SMBIOS strings: the SMBIOS roll-up matches the spoofer's target, but the CPU brand / signature / microcode, the PCI VID:DID of GPU + NIC, the monitor EDID chain, and the TPM EK hash do not. The composite is a different machine.
+- VM with a well-formed SMBIOS table: CPU signature probably matches the host (hypervisor exposes it), but the GPU enumeration will land on a VMware / VirtualBox / QEMU display adapter VID, the TPM EK will be a software TPM (or absent), monitor EDID will be a vendored default. The composite is a VM, not the host.
+- Physical TPM swap: the EK hash changes. The composite is a different machine. Legitimate (motherboard RMA with replaced TPM) or not — the backend's ban policy decides.
 
 ### 7.4 Image + process callbacks
 
@@ -530,6 +569,162 @@ The collector preserves each 32-byte digest verbatim in the report (and in the w
 - No TCG event log parse. A non-zero `PCR[7]` only says *something* was extended. The `EV_EFI_VARIABLE_AUTHORITY` / `db` / `dbx` events are what tell you *what* was measured; replaying them against the running digest is how a backend upgrades from "the SB bank is not empty" to "the SB bank contains the policy this machine is supposed to be on."
 - No "same-as-last-boot" baseline. The driver captures the boot digest; comparing it against a backend-persisted previous-boot value catches a quiet policy swap (PCR[7] non-zero both times, but different) that the local check cannot see.
 
+### 7.16 HVCI / Core Isolation requirement
+
+`hvci_require.c` is the gate competitive-integrity backends want when they are willing to say "no HVCI, no match." HVCI (Hypervisor-protected Code Integrity — the kernel half of Windows' Core Isolation / Memory Integrity) runs KMCI inside the root hypervisor's VTL1, which makes the kernel code-integrity decision one the guest VTL0 (where attackers run) can observe but cannot override. On an HVCI-enforcing host, unsigned kernel drivers do not load, kernel code pages are frozen read-execute by SLAT and cannot be made writable from inside the guest, and the entire class of BYOVD → disable-PatchGuard / inline-ntoskrnl attacks stops at the first write. Anti-cheats that want to raise the floor past BYOVD check for HVCI before letting a session start.
+
+Three independent sources are collected at baseline, every layer tracked independently so a disagreement between them is itself a signal:
+
+- **Kernel: live `CodeIntegrityOptions`.** `ZwQuerySystemInformation(SystemCodeIntegrityInformation = 103)` returns `{ ULONG Length; ULONG CodeIntegrityOptions; }`. The bitmap is the runtime truth — bit `0x0001` `ENABLED` (CI on), `0x0002` `TESTSIGN` (test-signing — kernel will load unsigned drivers signed with a user-generated key, bad for AC), `0x0080` `DEBUGMODE_ENABLED` (kernel debugger attached, bad for AC), `0x0400` `HVCI_KMCI_ENABLED` (HVCI actually running), `0x0800` `HVCI_KMCI_AUDITMODE` (HVCI reports violations but doesn't block), `0x1000` `HVCI_KMCI_STRICTMODE` (strict code-integrity policy on top of HVCI), `0x4000` `WHQL_ENFORCEMENT_ENABLED` (WHQL-signed-only). Each bit lands in the report as a dedicated `HVCI_FLAG_*`.
+
+- **Hardware: CPUID hypervisor probe.** `__cpuid(1)` leaves `ECX[31] = hypervisor present`. On a set bit, `__cpuid(0x40000000)` returns the hypervisor vendor string in `EBX|ECX|EDX` — `"Microsoft Hv"` for the Hyper-V root scheduler (which is what HVCI runs on), `"VMwareVMware"` / `"KVMKVMKVM"` / `"VBoxVBoxVBox"` / `"XenVMMXenVMM"` / `"TCGTCGTCGTCG"` / `"QNXQVMBSQG"` for guests running under non-Microsoft hypervisors. The vendor string is both kept verbatim in the report and FNV1a32-hashed into a stable `HypervisorVendorHash` so backend joins are cheap. A foreign vendor is tagged with both `HVCI_FLAG_HV_VENDOR_FOREIGN` **and** `HVCI_FLAG_SUSPICIOUS` on its own — a cheater running the game inside a userland-visible VM is a well-known shape to isolate kernel-level modification from the host AC.
+
+- **Policy: DeviceGuard registry.** `\Registry\Machine\SYSTEM\CurrentControlSet\Control\DeviceGuard\EnableVirtualizationBasedSecurity` (`REG_DWORD`) is the VBS master switch; `…\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity\Enabled` (`REG_DWORD`) is the HVCI scenario switch. These are the *intended* configuration, not the live state. Divergence between "policy says on" and "kernel says off" (or vice-versa) sets `HVCI_FLAG_CLAIM_DISAGREEMENT`.
+
+**The specific shapes this detector catches that an EFI-only or registry-only check cannot:**
+
+- **Hypervisor hidden from CPUID.** DeviceGuard registry says VBS is on, but `CPUID.1:ECX[31]` is clear — a non-root hypervisor is sitting between the guest and real hardware, filtering the CPUID the OS sees and answering MSR / hypercall reads with whatever will keep the kernel's cached HVCI story intact. Flagged as `HVCI_FLAG_HV_HIDDEN_FROM_CPUID | SUSPICIOUS`.
+- **Foreign hypervisor vendor.** `Microsoft Hv` is Hyper-V's root scheduler, the only vendor HVCI actually runs on. Any other string — VMware, KVM, VirtualBox, Xen, QEMU, bhyve, bespoke — tells you the guest is being executed by something that is not the OS's HVCI stack, which is the setup commercial game-cheat VMs ship with.
+- **Audit mode.** `HVCI_KMCI_AUDITMODE` set without `HVCI_KMCI_ENABLED` escalating to enforce is Microsoft's "report but don't block" mode — it looks like HVCI is on in the UI, but the guest VTL0 will still successfully load unsigned kernel code. Classified as `AUDIT_ONLY` and treated as `SUSPICIOUS`.
+- **Test-signing or debug mode.** `CI_OPT_TESTSIGN` or `CI_OPT_DEBUGMODE_ENABLED` on top of anything else short-circuits to `TEST_SIGNING` state. A box in test-signing or with a kernel debugger attached does not need HVCI to be bypassed — the signing floor is already gone.
+- **Runtime drift.** `HvciRequireVerify` re-reads `CodeIntegrityOptions` and the vendor string every 30 s and diffs both the raw options bitmap and the derived state against the boot baseline. A bit that moves at runtime (e.g. an attacker who got code to clear `HVCI_KMCI_ENABLED` through a shadow CI edit) sets `HVCI_FLAG_STATE_DRIFT | SUSPICIOUS` and routes `WIRE_REC_TAMPER(AC_TAMPER_REASON_HVCI)`.
+
+**State classification:**
+
+| State | Condition |
+|---|---|
+| `UNKNOWN`         | no CI info, no hypervisor, no registry — nothing to conclude |
+| `UNSUPPORTED`     | hypervisor absent, VBS registry off, CI info unreadable — pre-VBS Windows, no HV capability, or kernel class blocked |
+| `AVAILABLE_OFF`   | hypervisor present or registry says VBS on, but kernel bit `HVCI_KMCI_ENABLED` is clear — HVCI capable, deliberately disabled |
+| `AUDIT_ONLY`      | `HVCI_KMCI_ENABLED` + `HVCI_KMCI_AUDITMODE` — reporting without enforcing |
+| `ENFORCING`       | `HVCI_KMCI_ENABLED` set, no audit, no strict |
+| `STRICT`          | `HVCI_KMCI_ENABLED` + `HVCI_KMCI_STRICTMODE` — strongest in-box setting |
+| `TEST_SIGNING`    | `CI_OPT_TESTSIGN` or `CI_OPT_DEBUGMODE_ENABLED` set — kernel will accept unsigned drivers |
+
+Anything that is not `ENFORCING` or `STRICT` sets `HVCI_FLAG_REQUIRED_NOT_MET` and raises `HVCI_FLAG_SUSPICIOUS`. The detector always emits `WIRE_REC_HVCI_REPORT` once at baseline (so the backend has the live state, the vendor string and the hash regardless of outcome) and emits it again only when `SUSPICIOUS` transitions into set or when `STATE_DRIFT` fires on verify — honest HVCI-enforcing hardware stays quiet after the hello.
+
+**Flag bits** exposed in `hvci_require.h`:
+
+| Bit | Name | Meaning |
+|---:|---|---|
+| `0x00000001` | `CI_READABLE`           | `ZwQuerySystemInformation(SystemCodeIntegrityInformation)` returned success |
+| `0x00000002` | `CI_ENABLED`            | `CI_OPT_ENABLED` bit set in `CodeIntegrityOptions` |
+| `0x00000004` | `CI_TEST_SIGN`          | `CI_OPT_TESTSIGN` set — test-signing accepted |
+| `0x00000008` | `CI_DEBUG_MODE`         | `CI_OPT_DEBUGMODE_ENABLED` set — kernel debugger context |
+| `0x00000010` | `CI_UMCI_ENABLED`       | `CI_OPT_UMCI_ENABLED` — user-mode CI active (WDAC) |
+| `0x00000020` | `HVCI_KMCI_ENABLED`     | `CI_OPT_HVCI_KMCI_ENABLED` — HVCI actually enforcing KMCI |
+| `0x00000040` | `HVCI_AUDIT_MODE`       | `CI_OPT_HVCI_KMCI_AUDITMODE` — report-only HVCI |
+| `0x00000080` | `HVCI_STRICT_MODE`      | `CI_OPT_HVCI_KMCI_STRICTMODE` — strict policy on top of HVCI |
+| `0x00000100` | `WHQL_ENFORCEMENT`      | `CI_OPT_WHQL_ENFORCEMENT_ENABLED` — WHQL-signed-only |
+| `0x00000200` | `HYPERVISOR_PRESENT`    | `CPUID.1:ECX[31]` set |
+| `0x00000400` | `HV_VENDOR_MICROSOFT`   | `CPUID.0x40000000` vendor == `"Microsoft Hv"` |
+| `0x00000800` | `HV_VENDOR_FOREIGN`     | hypervisor present, vendor is not Microsoft Hv |
+| `0x00001000` | `REG_VBS_ENABLED`       | `DeviceGuard\EnableVirtualizationBasedSecurity` DWORD != 0 |
+| `0x00002000` | `REG_HVCI_ENABLED`      | `DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity\Enabled` DWORD != 0 |
+| `0x00004000` | `CLAIM_DISAGREEMENT`    | registry policy and kernel live state disagree on HVCI |
+| `0x00008000` | `STATE_DRIFT`           | `CodeIntegrityOptions` bitmap or derived state moved since boot |
+| `0x00010000` | `HV_HIDDEN_FROM_CPUID`  | registry says VBS on but CPUID hypervisor bit is clear |
+| `0x00020000` | `REQUIRED_NOT_MET`      | final state is not `ENFORCING` or `STRICT` |
+| `0x00040000` | `SUSPICIOUS`            | composite verdict — any of the above required the detector to speak up |
+
+**What this closes, concretely.** Everything a modern kernel cheat ships with — unsigned drivers loaded through a BYOVD, inline hooks on `ntoskrnl`, SSDT patches, `cr0.WP` clears, DKOM against the `ActiveProcessLinks` chain — needs the kernel to accept writes to kernel code pages or to load the attacker's driver. HVCI closes both. A backend that treats `HvciRequireGetFlag()` as a boot-time precondition (fail the session unless the flag is `HVCI_FLAG_HVCI_KMCI_ENABLED` without `HVCI_FLAG_HVCI_AUDIT_MODE` and without `HVCI_FLAG_HV_VENDOR_FOREIGN`) has removed BYOVD + inline-hook as a cheat-development path on that machine. The detector ships the full state to the backend rather than making the policy call in-driver, so operators can roll out the requirement gradually (log-only, soft-kick, hard-kick) without re-building the driver.
+
+**What this does not cover** (tracked in §17):
+
+- No Measured Boot replay. The detector sees the *runtime* answer the OS gives; a backend that wants ground-truth asks the TPM (via §7.15) for PCR[7] + PCR[11] + the TCG event log and verifies that HVCI was actually in the measurement chain. HVCI without a measured boot is a configuration the user can revert at reboot without the backend noticing.
+- No VBS second-stage checks. VBS carries Credential Guard, Secure Launch, and System Guard alongside HVCI; these use their own `CodeIntegrityOptions` siblings (`SystemSecureKernelInformation`) that are not read here yet.
+- No hypercall probe. A real Hyper-V root scheduler answers Hv#1 / Hv#2 hypercalls; a hostile hypervisor that returns `"Microsoft Hv"` from `CPUID.0x40000000` can still fail to implement the hypercall interface — a `HvHypercall(HvCallGetVpIndexFromApicId, …)` round-trip would catch that.
+
+### 7.17 OS version gate (advisory)
+
+`os_version_gate.c` is the one gate in the tree that intentionally does not escalate — it reports and lets the backend decide. The use case is Windows 11 25H2+ (build ≥ `26200`): a lot of competitive-integrity shops want to require current-gen Windows (HVCI defaults flipped on, PlayReady updates, Admin Protection, MMIO-restricted Windows), but they want to roll the requirement out in stages (log → soft-warn → soft-kick → hard-kick) rather than brick half the player base on day one.
+
+Collection runs at `PASSIVE_LEVEL` from the deferred-init worker:
+
+- **`RtlGetVersion`** → `RTL_OSVERSIONINFOEXW`: `MajorVersion`, `MinorVersion`, `BuildNumber`, `PlatformId`, `ServicePackMajor/Minor`, `ProductType`, `SuiteMask`, `szCSDVersion`. `RtlGetVersion` is the right call in the kernel — it ignores the manifest-based version shim that `GetVersion` honors in user mode, so a cheat cannot lie about the version through manifest compat.
+- **UBR**: `\Registry\Machine\SOFTWARE\Microsoft\Windows NT\CurrentVersion\UBR` (`REG_DWORD`) — the patch-tuesday revision (`26200.1948` → UBR `1948`). Captured as `Ubr` in the report.
+
+Classification is deliberately minimal — `UNREADABLE`, `WRONG_PLATFORM`, `TOO_OLD`, `MEETS_MIN`. No flag ever sets `SUSPICIOUS` on its own, no `TAMPER` ever fires. The backend reads `OsVersionGateGetFlag()` and decides policy. If the build moves at runtime (e.g. an in-session update bumps UBR), the wire record is re-emitted so the backend can observe the drift, still without raising tamper.
+
+**Flag bits** exposed in `os_version_gate.h`:
+
+| Bit | Name | Meaning |
+|---:|---|---|
+| `0x0001` | `READABLE`              | `RtlGetVersion` succeeded |
+| `0x0002` | `IS_NT`                 | `PlatformId == VER_PLATFORM_WIN32_NT` |
+| `0x0004` | `IS_WORKSTATION`        | `ProductType == VER_NT_WORKSTATION` (client SKU, not Server) |
+| `0x0008` | `UBR_READABLE`          | UBR DWORD read from registry |
+| `0x0010` | `MEETS_MIN_BUILD`       | `BuildNumber >= MinimumBuildRequired` |
+| `0x0020` | `BELOW_MIN_BUILD`       | `BuildNumber <  MinimumBuildRequired` — the one the backend acts on |
+| `0x0040` | `INSIDER_LEAK`          | reserved: Insider / preview build detection via UBR heuristic |
+| `0x0080` | `SERVICE_PACK_PRESENT`  | legacy service-pack fields non-zero |
+
+The minimum build is `OSG_DEFAULT_MIN_BUILD = 26200` and is a compile-time constant — the backend only needs to inspect the flag, not configure the driver. A future revision that moves the floor to `26300` is a one-line change.
+
+### 7.18 VBS requirement
+
+`vbs_require.c` is the VBS platform check: *is the secure kernel actually running inside VTL1?* HVCI (§7.16) runs on top of VBS; a backend that only checks the HVCI bit will accept a system where VBS is down but the `CodeIntegrityOptions` byte has not been refreshed. `vbs_require` goes to the authoritative source.
+
+Collection:
+
+- **IUM info.** `ZwQuerySystemInformation(SystemIsolatedUserModeInformation = 165)` returns a buffer whose first byte is a bitfield: bit 0 `SecureKernelRunning`, bit 1 `HvciEnabled`, bit 2 `HvciStrictMode`, bit 3 `DebugEnabled`, bit 4 `FirmwarePageProtection`, bit 5 `EncryptionKeyAvailable`. We parse the first byte only and surface each bit as its own flag.
+- **Hypervisor identity.** Same CPUID probe as `hvci_require` — vendor string must be `"Microsoft Hv"` for VBS to actually be VBS. Foreign hypervisor sets `SUSPICIOUS` on its own, since VBS does not run under VMware / KVM / VBox.
+- **Registry policy.** `DeviceGuard\EnableVirtualizationBasedSecurity` + `DeviceGuard\RequirePlatformSecurityFeatures` + `Lsa\LsaCfgFlags` for Credential Guard. A disagreement between `RegVbsEnabled` and the live `SecureKernelRunning` is the marker for policy pushed but not honored (common pattern on consumer hardware where VBS is configured but the firmware path blocks it).
+
+Classification: `UNKNOWN` / `UNSUPPORTED` / `AVAILABLE_OFF` / `ENABLED` / `STRICT`. Anything not `ENABLED` or `STRICT` sets `REQUIRED_NOT_MET | SUSPICIOUS` and emits `TAMPER(VBS)`. Runtime drift on the IUM byte or state value triggers the same.
+
+**Flag bits** exposed in `vbs_require.h` (abbreviated — `IUM_INFO_READABLE`, `SECURE_KERNEL_RUNNING`, `HVCI_RUNNING`, `HVCI_STRICT_MODE`, `IUM_DEBUG_ENABLED`, `FW_PAGE_PROTECTION`, `ENCRYPTION_KEY_AVAILABLE`, `REG_VBS_ENABLED`, `REG_VBS_REQUIRED`, `REG_LSA_CFG_ENABLED`, `CPUID_HV_PRESENT`, `HV_VENDOR_MICROSOFT`, `HV_VENDOR_FOREIGN`, `HV_HIDDEN_FROM_CPUID`, `CLAIM_DISAGREEMENT`, `STATE_DRIFT`, `REQUIRED_NOT_MET`, `SUSPICIOUS`). `IUM_DEBUG_ENABLED` alone trips `SUSPICIOUS` because the secure-kernel debugger attached to the TrustletRunningWithTcb path is not a normal consumer config and lowers the attestation ceiling.
+
+### 7.19 IOMMU / Kernel DMA Protection requirement
+
+`iommu_require.c` is the gate against PCI DMA cards (pcileech / Screamer / LeetDMA / Captain-DMA / ZDMA — the same hardware `dma_detect` §7.11 fingerprints after the fact). If Kernel DMA Protection is in use, the IOMMU — VT-d on Intel, AMD-Vi on AMD — refuses DMA from any device that was plugged in without a signed PnP binding, which is the boot-time + hotplug surface those cards exploit. A backend that requires Kernel DMA Protection has removed the physical class of DMA attack from in-session threats.
+
+Collection:
+
+- **Live state.** `ZwQuerySystemInformation(SystemDmaProtectionInformation = 141)` → `{ BOOLEAN DmaProtectionsAvailable; BOOLEAN DmaProtectionsInUse; }`. `Available` means the firmware exposed an IOMMU table and Windows picked it up; `InUse` means Windows is actively routing DMA through it.
+- **Hardware presence.** `SystemFirmwareTableInformation` against provider `'ACPI'` with `TableID = 'DMAR'` (Intel VT-d DMA Remapping) and `'IVRS'` (AMD-Vi I/O Virtualization Reporting Structure). A zero-byte get returning `STATUS_BUFFER_TOO_SMALL` or `STATUS_SUCCESS` means the table exists on this box. These are the firmware-level markers for IOMMU capability.
+- **Registry policy.** `DeviceGuard\Scenarios\KernelDmaProtection\Enabled` (KDP policy switch) + `DmaSecurity\AllowBootDMA` (whether external DMA is accepted before login). `AllowBootDMA == 0` sets `REG_BOOT_DMA_BLOCK`, which is the strongest policy — blocks hotplug DMA until user login.
+
+Classification: `UNKNOWN` / `UNSUPPORTED` / `AVAILABLE_OFF` / `IN_USE`. Anything not `IN_USE` sets `REQUIRED_NOT_MET | SUSPICIOUS` and emits `TAMPER(IOMMU)`. Policy + live state disagreement (registry says on, live says off) sets `CLAIM_DISAGREEMENT`. Runtime drift on the state triggers re-emission.
+
+**Flag bits** exposed in `iommu_require.h`: `DMA_INFO_READABLE`, `DMA_PROT_AVAILABLE`, `DMA_PROT_IN_USE`, `REG_KDP_ENABLED`, `REG_BOOT_DMA_BLOCK`, `DMAR_TABLE_PRESENT`, `IVRS_TABLE_PRESENT`, `CLAIM_DISAGREEMENT`, `STATE_DRIFT`, `REQUIRED_NOT_MET`, `SUSPICIOUS`.
+
+This complements §7.11 — `dma_detect` catches a DMA card that is *already in the machine*; `iommu_require` catches a machine configured in a way that would let any future DMA card land its payload. One is "is a card there right now," the other is "is the hardware policy against DMA cards actually on."
+
+### 7.20 TPM 2.0 attestation
+
+`tpm_attest.c` is the strongest identity signal the driver produces, and the module `secureboot_attest` (§7.15) was always a stepping stone toward. Reading PCR[7] locally proves "this host saw a Secure Boot measurement at boot"; it does *not* prove "this specific TPM part saw it." A real attestation binds the measurement to an identity the attacker cannot forge — the EK (Endorsement Key), burned into the TPM silicon at manufacture, signed by the manufacturer's CA, uniquely identifying the TPM part.
+
+What this module collects:
+
+- **TPM properties via `TPM2_GetCapability(TPM_CAP_TPM_PROPERTIES)`.** Per-property round-trips to pull `TPM_PT_MANUFACTURER (0x105)`, `TPM_PT_VENDOR_STRING_1 (0x106)`, `TPM_PT_FIRMWARE_VERSION_1 (0x10B)`, `TPM_PT_FIRMWARE_VERSION_2 (0x10C)`. The manufacturer four-char string (e.g. `"IFX "` = Infineon, `"INTC"` = Intel PTT fTPM, `"AMD "` = AMD fTPM, `"STM "` = STMicroelectronics, `"NTC "` = Nuvoton, `"IBM "` = SW-TPM) tells the backend whether this is discrete TPM silicon or a firmware TPM; firmware versions tell it whether the TPM is patched against the published vulnerability sets (TPM-FAIL / TPM-Spark / ROCA).
+- **EK public key via `TPM2_ReadPublic(0x81010001)`.** The handle `0x81010001` is the standard persistent RSA-2048 EK (TCG EK Credential Profile section 2.1.5). We parse the response as `TPM2B_PUBLIC` (2-byte size + `TPMT_PUBLIC`) followed by `TPM2B_NAME` (2-byte size + name blob). The name is `SHA-256(TPMT_PUBLIC)` — a stable identity for this TPM. We also SHA-256 the raw `TPMT_PUBLIC` ourselves to produce a second identity hash (`EkPublicSha256`). Both are stored in the report and emitted on the wire.
+- **PCR fold from `secureboot_attest`.** Rather than re-reading the TPM, we pull the already-cached PCR[0], PCR[7], and PCR[14] digests from §7.15's report. This keeps the two modules consistent and halves the number of TPM round-trips.
+- **Companion-pushed nonce.** The companion issues `IOCTL_AC_PUSH_TPM_NONCE` with 32 fresh bytes before the attestation round. The nonce is stored under the report lock and consumed on the next baseline / verify pass. A real session rotates the nonce every cycle.
+
+**The attestation bundle.** On every pass where EK + nonce + PCRs are all present, the module computes:
+
+```
+BundleSha256 = SHA-256( Nonce || EkName || EkPublicSha256 || PCR[0] || PCR[7] || PCR[14] )
+```
+
+This is not a *signed* quote — we do not hold the private half of any key the TPM would sign with — but it is a nonce-bound, replay-safe projection of (TPM identity, measured boot state) that the backend verifies as the four things it gets together:
+
+1. The nonce the backend issued this round (so an old captured bundle cannot be replayed).
+2. The TPM name + public hash (so it is bound to a specific TPM part, which the backend can cross-check against a manufacturer-cert catalog it owns).
+3. The measured boot digests (so Secure Boot policy is tied to this TPM, not to some other TPM a replay attack would substitute).
+4. All of it, hashed, under one commitment the backend verifies with its own copy of the inputs.
+
+A real `TPM2_Quote` with an AK is the natural next step and is in the §17 roadmap — it signs the bundle with a key the TPM proves is bound to the EK. The current bundle is strictly weaker than that, but strictly stronger than §7.15's raw `PCR_Read` alone: it adds the identity binding and the challenge nonce.
+
+**State classification:** `UNKNOWN` / `NO_TPM` / `EK_FAILED` / `PROPS_ONLY` / `EK_READY` / `BUNDLE_READY`. `NO_TPM`, `EK_FAILED`, and `PROPS_ONLY` all trip `SUSPICIOUS` + `TAMPER(TPM_ATTEST)`. `BUNDLE_READY` is the terminal happy state and is what the backend verifies.
+
+**Runtime drift.** Every heartbeat re-reads the EK public and the PCRs. An EK name / hash that moves is a TPM swap mid-session (physically impossible without a boot) — trips `EK_DRIFTED | SUSPICIOUS`. A bundle hash that moves without an EK change means the PCRs moved — PCR[7] drift is already called out by §7.15, but the bundle drift gets its own flag so the backend can observe it even if the SB module's wire record was missed.
+
+**IOCTLs:** `IOCTL_AC_PUSH_TPM_NONCE (0x81D)` pushes 32 bytes, `IOCTL_AC_QUERY_TPM_ATTEST_FLAG (0x81E)` returns the live flag bitmap, `IOCTL_AC_QUERY_TPM_ATTEST_REPORT (0x81F)` returns the full report including the EK name, EK public hash, nonce, PCR digests, and bundle hash.
+
+**Flag bits** exposed in `tpm_attest.h`: `TPM_PRESENT`, `PROPS_READABLE`, `MANUFACTURER_KNOWN`, `EK_READABLE`, `EK_NAME_EXTRACTED`, `EK_PUBLIC_HASHED`, `PCRS_PRESENT`, `NONCE_PRESENT`, `BUNDLE_READY`, `BUNDLE_DRIFTED`, `EK_DRIFTED`, `SUSPICIOUS`.
+
 ---
 
 ## 8. Wire protocol
@@ -565,6 +760,7 @@ Payload types in this build:
 | `0x40` | `HWID_HELLO` | `WIRE_HWID_HELLO` |
 | `0x41` | `HWID_DISK` | reserved |
 | `0x42` | `HWID_MEMORY` | reserved |
+| `0x43` | `HWID_EXTENDED` | `HWID_EXTENDED_FINGERPRINT` (CPU + GPU + NIC + monitor EDID + TPM EK hash) |
 | `0x50` | `UNBACKED_EXEC` | `WIRE_UNBACKED_EXEC` |
 | `0x51` | `INPUT_HIJACK` | `WIRE_INPUT_HIJACK` |
 | `0x52` | `PIDDB_TAMPER` | `WIRE_PIDDB_TAMPER` |
@@ -578,6 +774,11 @@ Payload types in this build:
 | `0x5B` | `WIN32K_HOOK` | `WIRE_WIN32K_HOOK` |
 | `0x5C` | `MOUSE_POLLING` | `WIRE_MOUSE_POLLING` |
 | `0x5D` | `SECUREBOOT_REPORT` | `WIRE_SECUREBOOT_REPORT` |
+| `0x5E` | `HVCI_REPORT`       | `WIRE_HVCI_REPORT` |
+| `0x5F` | `OS_VERSION`        | `WIRE_OS_VERSION_REPORT` |
+| `0x60` | `VBS_REPORT`        | `WIRE_VBS_REPORT` |
+| `0x61` | `IOMMU_REPORT`      | `WIRE_IOMMU_REPORT` |
+| `0x62` | `TPM_ATTEST`        | `WIRE_TPM_ATTEST_REPORT` |
 
 Tamper reason codes carried by `WIRE_TAMPER.Reason`:
 
@@ -599,6 +800,10 @@ Tamper reason codes carried by `WIRE_TAMPER.Reason`:
 | `0x100E` | `W32K_APC_INJECT` | reserved: APC queued to a GUI thread with a `NormalRoutine` outside a trusted kernel module |
 | `0x100F` | `MOUSE_POLLING`  | Mouclass write-pointer sampling returned σ ≤ 15 µs, burst rate ≥ 20 %, instant Hz > 10 000, or > 20 packets in one 1 ms tick |
 | `0x1010` | `SECUREBOOT`     | Secure Boot ↔ TPM PCR cross-check: PCR[7] all-zero while OS claims SB on, OS claims SB on without a TPM, EFI/sysinfo/registry disagreement, or runtime PCR[7] drift |
+| `0x1011` | `HVCI`           | HVCI not enforcing, audit-only, test-signing / debug mode, foreign hypervisor vendor, hypervisor hidden from CPUID, registry / kernel disagreement, or runtime `CodeIntegrityOptions` drift |
+| `0x1012` | `VBS`            | VBS secure kernel not running, IUM flag byte drift, foreign hypervisor vendor, IUM debug enabled, or policy / live state disagreement |
+| `0x1013` | `IOMMU`          | `DmaProtectionsInUse == FALSE`, DMAR / IVRS table absent on a machine the policy claims is protected, or runtime state drift on `SystemDmaProtectionInformation` |
+| `0x1014` | `TPM_ATTEST`     | TPM absent, EK ReadPublic failed, props-only (no EK), or EK name / public hash drift between boot and heartbeat |
 
 User mode drains the ring by issuing `IOCTL_AC_EVENT_POLL` with an output buffer; the driver copies as many whole records as fit and returns the byte count via `IoStatus.Information`.
 
@@ -628,6 +833,17 @@ User mode drains the ring by issuing `IOCTL_AC_EVENT_POLL` with an output buffer
 | `0x812` | `IOCTL_AC_QUERY_DMA_FLAG`     | 4 B out | Read the current `g_DmaFlag` bitmap |
 | `0x813` | `IOCTL_AC_QUERY_SECUREBOOT_FLAG`   | 4 B out | Read the current `SB_FLAG_*` bitmap |
 | `0x814` | `IOCTL_AC_QUERY_SECUREBOOT_REPORT` | `SECUREBOOT_ATTEST_REPORT` out | Pull the full Secure Boot / TPM PCR report (flags, state, PCR[0]/PCR[7]/PCR[14] digests, PCR[7] baseline) |
+| `0x815` | `IOCTL_AC_QUERY_HVCI_FLAG`         | 4 B out | Read the current `HVCI_FLAG_*` bitmap |
+| `0x816` | `IOCTL_AC_QUERY_HVCI_REPORT`       | `HVCI_REQUIRE_REPORT` out | Pull the full HVCI / Core Isolation report (flags, state, `CodeIntegrityOptions`, hypervisor vendor + hash, registry + runtime bits) |
+| `0x817` | `IOCTL_AC_QUERY_OS_VERSION_FLAG`   | 4 B out | Read the current `OSG_FLAG_*` bitmap |
+| `0x818` | `IOCTL_AC_QUERY_OS_VERSION_REPORT` | `OS_VERSION_REPORT` out | Pull the full `RtlGetVersion` + UBR report (advisory, not a tamper source) |
+| `0x819` | `IOCTL_AC_QUERY_VBS_FLAG`          | 4 B out | Read the current `VBS_FLAG_*` bitmap |
+| `0x81A` | `IOCTL_AC_QUERY_VBS_REPORT`        | `VBS_REQUIRE_REPORT` out | Pull the full VBS / secure-kernel report (IUM flag byte, hypervisor vendor + hash, registry policy bits) |
+| `0x81B` | `IOCTL_AC_QUERY_IOMMU_FLAG`        | 4 B out | Read the current `IOMMU_FLAG_*` bitmap |
+| `0x81C` | `IOCTL_AC_QUERY_IOMMU_REPORT`      | `IOMMU_REQUIRE_REPORT` out | Pull the full Kernel DMA Protection report (live state, ACPI DMAR/IVRS presence, policy registry) |
+| `0x81D` | `IOCTL_AC_PUSH_TPM_NONCE`          | 32 B in | Push a fresh 32-byte challenge nonce the next TPM attestation pass will bind into its bundle |
+| `0x81E` | `IOCTL_AC_QUERY_TPM_ATTEST_FLAG`   | 4 B out | Read the current `TPM_ATTEST_FLAG_*` bitmap |
+| `0x81F` | `IOCTL_AC_QUERY_TPM_ATTEST_REPORT` | `TPM_ATTEST_REPORT` out | Pull the full TPM attestation report (manufacturer, firmware, EK name, EK public hash, nonce, PCR digests, composite bundle hash) |
 
 Blob slots are keyed by `CHANNEL_BLOB_KIND`, replaced in place on a repeat push, and read back by subsystems via `ChannelGetBlob` or the suffix-match helper `ChannelBlobEqualsW`.
 
@@ -765,6 +981,13 @@ Suggested next steps for anyone taking this further:
 - Finish the EK-bound quote path in `secureboot_attest`: build a `TPM2_ReadPublic` for `0x81010001`, cache the EK `TPM2B_NAME`, and issue `TPM2_Quote` over PCR[0] / PCR[7] / PCR[14] so the backend can verify the digests against the EK rather than trusting a raw `PCR_Read` — the plumbing in `pcr_compare`'s reference port already parses the name blob.
 - Parse the TCG EFI event log in `secureboot_attest` and replay `EV_EFI_VARIABLE_AUTHORITY` / `db` / `dbx` events against the observed PCR[7] digest. A non-zero PCR[7] only means something was extended; the event log tells the backend *what* policy was measured.
 - Persist the boot PCR[7] baseline per HWID at the backend and feed it back through `IOCTL_AC_PUSH_HASH`; `secureboot_attest` then raises a mismatch when PCR[7] does not match the prior boot for the same machine — catches a quiet policy swap that the in-session check cannot see.
+- Round-trip a cheap Hyper-V hypercall (`HvCallGetVpIndexFromApicId`) from `hvci_require` to catch a hostile hypervisor that spoofs `CPUID.0x40000000` to `"Microsoft Hv"` without implementing the Hv#1 interface — a Microsoft-vendored hypervisor answers the hypercall, a fake one returns an invalid-opcode fault.
+- Extend `hvci_require` to read `SystemSecureKernelInformation` and surface Credential Guard, Secure Launch and System Guard state alongside HVCI — same shape of detector, different VBS sibling, same backend record type.
+- Bind `hvci_require` to §7.15 so HVCI being `ENFORCING` is cross-checked against the TCG event log's `EV_EFI_HANDOFF_TABLES` entries — the backend wants "HVCI is on *and* was measured," not just "the live bit is set right now."
+- Replace §7.20's local bundle hash with a real `TPM2_Quote` signed by an AIK bound to the EK. Requires session management (password / HMAC auth) and either a Windows-provisioned AK handle (persistent at `0x81000001` on TBS-provisioned boxes) or `TPM2_Create` + `TPM2_Load` against the SRK — more plumbing but the quote is then cryptographically unforgeable, not just nonce-bound.
+- Fold the disk serial into HWID via `IOCTL_STORAGE_QUERY_PROPERTY(StorageDeviceProperty)` on each `\Device\HarddiskN\PartitionM` — closes the "swap NVMe to dodge the ban" path. Currently skipped because the driver-level IRP build + storage-filter stack is more involved than the registry + PCI paths already landed.
+- NIC MAC fingerprinting through `NDIS_OID_802_3_PERMANENT_ADDRESS` or an NDIS filter — the PCI VID:DID of the NIC lands in HWID but the MAC itself does not. Would need an NDIS driver layer rather than a plain WDM device.
+- `os_version_gate` currently has no `INSIDER_LEAK` heuristic — reserve the flag bit, implement by UBR / branch-name parsing from `BuildLabEx` once the backend asks for it.
 
 ---
 

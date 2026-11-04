@@ -28,3 +28,8 @@ Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\image_backing.c;Z:\!NIMRODCO
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\win32k_guard.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\win32k_guard.obj
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\mouse_polling.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\mouse_polling.obj
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\secureboot_attest.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\secureboot_attest.obj
+Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\hvci_require.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\hvci_require.obj
+Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\os_version_gate.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\os_version_gate.obj
+Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\vbs_require.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\vbs_require.obj
+Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\iommu_require.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\iommu_require.obj
+Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\tpm_attest.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\tpm_attest.obj

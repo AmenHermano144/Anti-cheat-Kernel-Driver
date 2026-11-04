@@ -8,6 +8,11 @@
 #include "overlay_detect.h"
 #include "dma_detect.h"
 #include "secureboot_attest.h"
+#include "hvci_require.h"
+#include "os_version_gate.h"
+#include "vbs_require.h"
+#include "iommu_require.h"
+#include "tpm_attest.h"
 
 static NTSTATUS CompleteIrp(PIRP Irp, NTSTATUS Status, ULONG Info)
 {
@@ -153,6 +158,144 @@ static NTSTATUS HandleQuerySecureBootReport(PVOID buf, ULONG inLen, ULONG outLen
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS HandleQueryHvciFlag(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(inLen);
+    *written = 0;
+    if (!buf || outLen < sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
+    ULONG value = HvciRequireGetFlag();
+    RtlCopyMemory(buf, &value, sizeof(value));
+    *written = sizeof(value);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS HandleQueryHvciReport(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(inLen);
+    *written = 0;
+    if (!buf || outLen < sizeof(HVCI_REQUIRE_REPORT)) return STATUS_INVALID_PARAMETER;
+
+    HVCI_REQUIRE_REPORT rep;
+    NTSTATUS s = HvciRequireCopyReport(&rep);
+    if (!NT_SUCCESS(s)) return s;
+
+    RtlCopyMemory(buf, &rep, sizeof(rep));
+    *written = sizeof(rep);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS HandleQueryOsVersionFlag(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(inLen);
+    *written = 0;
+    if (!buf || outLen < sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
+    ULONG value = OsVersionGateGetFlag();
+    RtlCopyMemory(buf, &value, sizeof(value));
+    *written = sizeof(value);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS HandleQueryOsVersionReport(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(inLen);
+    *written = 0;
+    if (!buf || outLen < sizeof(OS_VERSION_REPORT)) return STATUS_INVALID_PARAMETER;
+
+    OS_VERSION_REPORT rep;
+    NTSTATUS s = OsVersionGateCopyReport(&rep);
+    if (!NT_SUCCESS(s)) return s;
+
+    RtlCopyMemory(buf, &rep, sizeof(rep));
+    *written = sizeof(rep);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS HandleQueryVbsFlag(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(inLen);
+    *written = 0;
+    if (!buf || outLen < sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
+    ULONG value = VbsRequireGetFlag();
+    RtlCopyMemory(buf, &value, sizeof(value));
+    *written = sizeof(value);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS HandleQueryVbsReport(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(inLen);
+    *written = 0;
+    if (!buf || outLen < sizeof(VBS_REQUIRE_REPORT)) return STATUS_INVALID_PARAMETER;
+
+    VBS_REQUIRE_REPORT rep;
+    NTSTATUS s = VbsRequireCopyReport(&rep);
+    if (!NT_SUCCESS(s)) return s;
+
+    RtlCopyMemory(buf, &rep, sizeof(rep));
+    *written = sizeof(rep);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS HandleQueryIommuFlag(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(inLen);
+    *written = 0;
+    if (!buf || outLen < sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
+    ULONG value = IommuRequireGetFlag();
+    RtlCopyMemory(buf, &value, sizeof(value));
+    *written = sizeof(value);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS HandleQueryIommuReport(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(inLen);
+    *written = 0;
+    if (!buf || outLen < sizeof(IOMMU_REQUIRE_REPORT)) return STATUS_INVALID_PARAMETER;
+
+    IOMMU_REQUIRE_REPORT rep;
+    NTSTATUS s = IommuRequireCopyReport(&rep);
+    if (!NT_SUCCESS(s)) return s;
+
+    RtlCopyMemory(buf, &rep, sizeof(rep));
+    *written = sizeof(rep);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS HandlePushTpmNonce(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(outLen);
+    *written = 0;
+    if (!buf || inLen < TPM_ATTEST_NONCE_LEN) return STATUS_INVALID_PARAMETER;
+    return TpmAttestPushNonce((const UCHAR *)buf, TPM_ATTEST_NONCE_LEN);
+}
+
+static NTSTATUS HandleQueryTpmAttestFlag(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(inLen);
+    *written = 0;
+    if (!buf || outLen < sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
+    ULONG value = TpmAttestGetFlag();
+    RtlCopyMemory(buf, &value, sizeof(value));
+    *written = sizeof(value);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS HandleQueryTpmAttestReport(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(inLen);
+    *written = 0;
+    if (!buf || outLen < sizeof(TPM_ATTEST_REPORT)) return STATUS_INVALID_PARAMETER;
+
+    TPM_ATTEST_REPORT rep;
+    NTSTATUS s = TpmAttestCopyReport(&rep);
+    if (!NT_SUCCESS(s)) return s;
+
+    RtlCopyMemory(buf, &rep, sizeof(rep));
+    *written = sizeof(rep);
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS CoreIoctlDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     UNREFERENCED_PARAMETER(DeviceObject);
@@ -228,6 +371,39 @@ NTSTATUS CoreIoctlDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         break;
     case IOCTL_AC_QUERY_SECUREBOOT_REPORT:
         s = HandleQuerySecureBootReport(buf, inLen, outLen, &written);
+        break;
+    case IOCTL_AC_QUERY_HVCI_FLAG:
+        s = HandleQueryHvciFlag(buf, inLen, outLen, &written);
+        break;
+    case IOCTL_AC_QUERY_HVCI_REPORT:
+        s = HandleQueryHvciReport(buf, inLen, outLen, &written);
+        break;
+    case IOCTL_AC_QUERY_OS_VERSION_FLAG:
+        s = HandleQueryOsVersionFlag(buf, inLen, outLen, &written);
+        break;
+    case IOCTL_AC_QUERY_OS_VERSION_REPORT:
+        s = HandleQueryOsVersionReport(buf, inLen, outLen, &written);
+        break;
+    case IOCTL_AC_QUERY_VBS_FLAG:
+        s = HandleQueryVbsFlag(buf, inLen, outLen, &written);
+        break;
+    case IOCTL_AC_QUERY_VBS_REPORT:
+        s = HandleQueryVbsReport(buf, inLen, outLen, &written);
+        break;
+    case IOCTL_AC_QUERY_IOMMU_FLAG:
+        s = HandleQueryIommuFlag(buf, inLen, outLen, &written);
+        break;
+    case IOCTL_AC_QUERY_IOMMU_REPORT:
+        s = HandleQueryIommuReport(buf, inLen, outLen, &written);
+        break;
+    case IOCTL_AC_PUSH_TPM_NONCE:
+        s = HandlePushTpmNonce(buf, inLen, outLen, &written);
+        break;
+    case IOCTL_AC_QUERY_TPM_ATTEST_FLAG:
+        s = HandleQueryTpmAttestFlag(buf, inLen, outLen, &written);
+        break;
+    case IOCTL_AC_QUERY_TPM_ATTEST_REPORT:
+        s = HandleQueryTpmAttestReport(buf, inLen, outLen, &written);
         break;
     default:
         break;

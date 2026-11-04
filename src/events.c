@@ -195,3 +195,38 @@ NTSTATUS EventsReportSecureBootReport(const WIRE_SECUREBOOT_REPORT *rec)
     if (!rec) return STATUS_INVALID_PARAMETER;
     return ChannelEnqueueRecord(WIRE_REC_SECUREBOOT_REPORT, rec, sizeof(*rec));
 }
+
+NTSTATUS EventsReportHvciReport(const WIRE_HVCI_REPORT *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_HVCI_REPORT, rec, sizeof(*rec));
+}
+
+NTSTATUS EventsReportOsVersionReport(const WIRE_OS_VERSION_REPORT *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_OS_VERSION, rec, sizeof(*rec));
+}
+
+NTSTATUS EventsReportVbsReport(const WIRE_VBS_REPORT *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_VBS_REPORT, rec, sizeof(*rec));
+}
+
+NTSTATUS EventsReportIommuReport(const WIRE_IOMMU_REPORT *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_IOMMU_REPORT, rec, sizeof(*rec));
+}
+
+NTSTATUS EventsReportTpmAttest(const WIRE_TPM_ATTEST_REPORT *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_TPM_ATTEST, rec, sizeof(*rec));
+}

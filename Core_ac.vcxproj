@@ -117,6 +117,11 @@
     <ClCompile Include="src\win32k_guard.c" />
     <ClCompile Include="src\mouse_polling.c" />
     <ClCompile Include="src\secureboot_attest.c" />
+    <ClCompile Include="src\hvci_require.c" />
+    <ClCompile Include="src\os_version_gate.c" />
+    <ClCompile Include="src\vbs_require.c" />
+    <ClCompile Include="src\iommu_require.c" />
+    <ClCompile Include="src\tpm_attest.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\core.h" />
@@ -150,6 +155,11 @@
     <ClInclude Include="src\win32k_guard.h" />
     <ClInclude Include="src\mouse_polling.h" />
     <ClInclude Include="src\secureboot_attest.h" />
+    <ClInclude Include="src\hvci_require.h" />
+    <ClInclude Include="src\os_version_gate.h" />
+    <ClInclude Include="src\vbs_require.h" />
+    <ClInclude Include="src\iommu_require.h" />
+    <ClInclude Include="src\tpm_attest.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

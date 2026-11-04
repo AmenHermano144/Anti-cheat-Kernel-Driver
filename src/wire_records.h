@@ -16,6 +16,7 @@
 #define WIRE_REC_HWID_HELLO     0x40
 #define WIRE_REC_HWID_DISK      0x41
 #define WIRE_REC_HWID_MEMORY    0x42
+#define WIRE_REC_HWID_EXTENDED  0x43
 #define WIRE_REC_UNBACKED_EXEC  0x50
 #define WIRE_REC_INPUT_HIJACK   0x51
 #define WIRE_REC_PIDDB_TAMPER   0x52
@@ -29,6 +30,11 @@
 #define WIRE_REC_WIN32K_HOOK    0x5B
 #define WIRE_REC_MOUSE_POLLING  0x5C
 #define WIRE_REC_SECUREBOOT_REPORT 0x5D
+#define WIRE_REC_HVCI_REPORT    0x5E
+#define WIRE_REC_OS_VERSION     0x5F
+#define WIRE_REC_VBS_REPORT     0x60
+#define WIRE_REC_IOMMU_REPORT   0x61
+#define WIRE_REC_TPM_ATTEST     0x62
 #define WIRE_REC_TEARDOWN       0x02
 
 #define MP_VERDICT_WAITING      0
@@ -340,4 +346,97 @@ typedef struct _WIRE_SECUREBOOT_REPORT
     UCHAR   Pcr14Sha256[32];
     UCHAR   Pcr7Baseline[32];
 } WIRE_SECUREBOOT_REPORT, *PWIRE_SECUREBOOT_REPORT;
+
+typedef struct _WIRE_HVCI_REPORT
+{
+    ULONG   Flags;
+    ULONG   State;
+    ULONG   CodeIntegrityOptions;
+    ULONG   HypervisorVendorHash;
+    UCHAR   CiReadable;
+    UCHAR   CiEnabled;
+    UCHAR   HvciKmciEnabled;
+    UCHAR   HvciStrictMode;
+    UCHAR   HvciAuditMode;
+    UCHAR   HypervisorPresent;
+    UCHAR   HypervisorIsMicrosoft;
+    UCHAR   RegVbsEnabled;
+    UCHAR   RegHvciEnabled;
+    UCHAR   TestSigning;
+    UCHAR   DebugMode;
+    UCHAR   RequiredNotMet;
+    CHAR    HypervisorVendor[16];
+} WIRE_HVCI_REPORT, *PWIRE_HVCI_REPORT;
+
+typedef struct _WIRE_OS_VERSION_REPORT
+{
+    ULONG   Flags;
+    ULONG   State;
+    ULONG   MajorVersion;
+    ULONG   MinorVersion;
+    ULONG   BuildNumber;
+    ULONG   Ubr;
+    ULONG   PlatformId;
+    USHORT  ServicePackMajor;
+    USHORT  ServicePackMinor;
+    USHORT  ProductType;
+    USHORT  SuiteMask;
+    ULONG   MinimumBuildRequired;
+    CHAR    CsdVersion[64];
+} WIRE_OS_VERSION_REPORT, *PWIRE_OS_VERSION_REPORT;
+
+typedef struct _WIRE_VBS_REPORT
+{
+    ULONG   Flags;
+    ULONG   State;
+    ULONG   IumFirstByte;
+    ULONG   HypervisorVendorHash;
+    UCHAR   CpuidHvPresent;
+    UCHAR   HypervisorIsMicrosoft;
+    UCHAR   IumReadable;
+    UCHAR   SecureKernelRunning;
+    UCHAR   HvciEnabled;
+    UCHAR   HvciStrictMode;
+    UCHAR   IumDebugEnabled;
+    UCHAR   FwPageProtection;
+    UCHAR   EncryptionKeyAvailable;
+    UCHAR   RegVbsEnabled;
+    UCHAR   RegVbsRequired;
+    UCHAR   RegLsaCfgEnabled;
+    UCHAR   RequiredNotMet;
+    CHAR    HypervisorVendor[16];
+} WIRE_VBS_REPORT, *PWIRE_VBS_REPORT;
+
+typedef struct _WIRE_IOMMU_REPORT
+{
+    ULONG   Flags;
+    ULONG   State;
+    UCHAR   DmaInfoReadable;
+    UCHAR   DmaProtectionsAvailable;
+    UCHAR   DmaProtectionsInUse;
+    UCHAR   RegKdpEnabled;
+    UCHAR   RegBootDmaBlock;
+    UCHAR   DmarTablePresent;
+    UCHAR   IvrsTablePresent;
+    UCHAR   RequiredNotMet;
+} WIRE_IOMMU_REPORT, *PWIRE_IOMMU_REPORT;
+
+typedef struct _WIRE_TPM_ATTEST_REPORT
+{
+    ULONG   Flags;
+    ULONG   State;
+    ULONG   Manufacturer;
+    ULONG   FirmwareVersion1;
+    ULONG   FirmwareVersion2;
+    USHORT  EkNameLen;
+    USHORT  Reserved0;
+    UCHAR   EkName[68];
+    UCHAR   EkPublicSha256[32];
+    UCHAR   Nonce[32];
+    UCHAR   Pcr0Sha256[32];
+    UCHAR   Pcr7Sha256[32];
+    UCHAR   Pcr14Sha256[32];
+    UCHAR   BundleSha256[32];
+    CHAR    VendorString[8];
+} WIRE_TPM_ATTEST_REPORT, *PWIRE_TPM_ATTEST_REPORT;
 #pragma pack(pop)

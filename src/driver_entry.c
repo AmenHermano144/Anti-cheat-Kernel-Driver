@@ -22,6 +22,11 @@
 #include "win32k_guard.h"
 #include "mouse_polling.h"
 #include "secureboot_attest.h"
+#include "hvci_require.h"
+#include "os_version_gate.h"
+#include "vbs_require.h"
+#include "iommu_require.h"
+#include "tpm_attest.h"
 
 CORE_AC_GLOBAL g_Core;
 
@@ -137,6 +142,22 @@ static VOID CoreDeferredInit(PVOID Context)
 
     (VOID)SecureBootAttestInit();
     (VOID)SecureBootAttestBaseline();
+
+    (VOID)HvciRequireInit();
+    (VOID)HvciRequireBaseline();
+
+    (VOID)OsVersionGateInit();
+    (VOID)OsVersionGateBaseline();
+
+    (VOID)VbsRequireInit();
+    (VOID)VbsRequireBaseline();
+
+    (VOID)IommuRequireInit();
+    (VOID)IommuRequireBaseline();
+
+    (VOID)TpmAttestInit();
+    (VOID)TpmAttestBaseline();
+    (VOID)HwidRefreshTpmBinding();
 
     status = CoreStartWorker();
     if (!NT_SUCCESS(status)) { CORE_LOG("StartWorker failed: 0x%08X", status); goto fail; }
@@ -378,6 +399,11 @@ static VOID CorePollWorker(PVOID Context)
             (VOID)Win32kGuardVerify();
             (VOID)MousePollingVerify();
             (VOID)SecureBootAttestVerify();
+            (VOID)HvciRequireVerify();
+            (VOID)OsVersionGateVerify();
+            (VOID)VbsRequireVerify();
+            (VOID)IommuRequireVerify();
+            (VOID)TpmAttestVerify();
             (VOID)ChannelFlushPending();
         }
 
@@ -412,6 +438,11 @@ VOID CoreDriverUnload(PDRIVER_OBJECT DriverObject)
     CoreUnregisterCallbacks();
     HookAuditUnregisterCallbacks();
     AcTamperDisarm();
+    TpmAttestShutdown();
+    IommuRequireShutdown();
+    VbsRequireShutdown();
+    OsVersionGateShutdown();
+    HvciRequireShutdown();
     SecureBootAttestShutdown();
     MousePollingShutdown();
     Win32kGuardShutdown();
