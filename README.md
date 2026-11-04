@@ -32,7 +32,7 @@ flowchart TB
     DEV["IoCreateDevice<br/>\\Device\\CoreAC + CoreAC_EVT<br/>DACL: SYSTEM + Admins"]:::passive
     SVC["ChannelInit · CryptoInit · EventsInit<br/>AcTamperArm (LSTAR) · NmiWatchdogRegister"]:::passive
     NTF["PsSetLoadImageNotifyRoutineEx<br/>PsSetCreateProcessNotifyRoutineEx"]:::passive
-    SNAP["KldrSnapshotModules · Pml4InitSnapshot<br/>ExecRegionScanSnapshot · InputIntegritySnapshot<br/>TamperRootkitSnapshot · HookAuditInit<br/>OverlayDetectInit · DmaDetectSnapshot<br/>ImageBackingBaseline (page-walker)"]:::passive
+    SNAP["KldrSnapshotModules · Pml4InitSnapshot<br/>ExecRegionScanSnapshot · InputIntegritySnapshot<br/>TamperRootkitSnapshot · HookAuditInit<br/>OverlayDetectInit · DmaDetectSnapshot<br/>ImageBackingBaseline (page-walker)<br/>SecureBootAttestBaseline (TPM PCR[0/7/14])"]:::passive
 
     WORKER["CorePollWorker<br/>30 s heartbeat loop"]:::hot
     RING[("SPSC wire ring<br/>IOCTL_AC_EVENT_POLL")]:::sink
@@ -79,6 +79,7 @@ Only `DriverEntry` runs synchronously. Device registration, callback installatio
 | `image_backing.{c,h}` | Image-backing integrity scanner driven by `page_walker`: per-module PE parse through physical reads, SHA-256 of the first executable section, per-leaf classification (RWX, writable .text, NX cleared, large-page backing), hole-ratio and hash-drift diff vs. the boot baseline; emits `PAGE_WALK_ANOMALY` |
 | `win32k_guard.{c,h}` | Session-space inline-hook detector for `win32kbase!SynthesizeMouseInput`: attaches to a GUI session process (winlogon / explorer) so win32k is addressable, pattern-locates the function, hashes a 256-byte sample via `page_walker`, diffs each heartbeat; also flags a jmp-shaped prologue (`E9 ??`, `FF 25`, `mov rax, imm64; jmp rax`); emits `WIN32K_HOOK` |
 | `mouse_polling.{c,h}` | Passive polling-statistics detector inspired by Vanguard's anti-Macku / anti-KMBox check: a 1 ms `KTIMER` + DPC samples each `MouClass` device's `DeviceExtension.WritePointer` without hooking anything, derives per-packet Δt, rolls a 100-sample window, and computes σ, burst rate (Δt < 0.5 ms), instant Hz, and max-packets-per-tick; emits `MOUSE_POLLING` with verdict `WAITING` / `NATURAL` / `SUSPICIOUS` / `INJECTION` |
+| `secureboot_attest.{c,h}` | Secure Boot ↔ TPM PCR cross-check (concept reversed from FACEIT / VGK): reads the `SecureBoot` and `SetupMode` EFI variables (`EFI_GLOBAL_VARIABLE_GUID`), `SystemSecureBootInformation` (class `0x91`), the `UEFISecureBootEnabled` registry value, and submits `TPM2_PCR_Read` against `\Device\TPM` (falling back to `\Device\TCM`) for PCR[0] (CRTM / firmware), PCR[7] (Secure Boot policy — PK/KEK/db/dbx), and PCR[14] (boot authority / CustomKernelSigners); fails closed when no TPM is addressable, exposes each software claim independently so disagreements are themselves a signal, re-reads PCR[7] at every heartbeat to catch runtime TPM-answer drift, and emits `WIRE_REC_SECUREBOOT_REPORT` with the full set of flags, state and raw SHA-256 digests |
 | `usermod.{c,h}` | User-mode module walker (PEB `InLoadOrderModuleList`) |
 | `strings.{c,h}` | Kernel-safe string primitives, FNV1a 32/64, memmem, hex formatter |
 | `core.h` | Shared types, pool tags, device names, status codes |
@@ -124,6 +125,7 @@ DriverEntry
         ├─ ImageBackingInit + Baseline         page-walker baseline: PE hash + per-leaf flags
         ├─ Win32kGuardInit + Baseline          win32kbase!SynthesizeMouseInput prolog hash
         ├─ MousePollingInit + DiscoverDevices  mouclass write-pointer snapshot, start 1 ms DPC
+        ├─ SecureBootAttestInit + Baseline     EFI/sysinfo/registry/TPM collect, PCR[0/7/14] snapshot
         └─ CoreStartWorker()                   30 s heartbeat loop
 ```
 
@@ -150,13 +152,14 @@ flowchart LR
     PW["ImageBackingVerify<br/>page-walker per-module scan"]:::det
     W32K["Win32kGuardVerify<br/>SMI prolog hash + jmp detect"]:::det
     MPV["MousePollingVerify<br/>jitter window · σ · burst rate"]:::det
+    SB["SecureBootAttestVerify<br/>EFI/sysinfo/reg + PCR[7] drift"]:::det
     HA["hook_audit (async)<br/>thread notify · ObReg · image load"]:::det
     MPD["mouse_polling DPC (1 ms)<br/>passive WritePointer sampling"]:::det
     FLUSH["ChannelFlushPending"]:::det
 
     RING[("SPSC wire ring")]:::ring
 
-    T --> NMI1 --> NMI2 --> HB --> PML --> KL --> EX --> IN --> TR --> DMA --> PW --> W32K --> MPV --> FLUSH
+    T --> NMI1 --> NMI2 --> HB --> PML --> KL --> EX --> IN --> TR --> DMA --> PW --> W32K --> MPV --> SB --> FLUSH
     MPD -.updates window-.-> MPV
     HA -.-> RING
     NMI2 -.-> RING
@@ -170,6 +173,7 @@ flowchart LR
     PW -.page-walk anomaly.-> RING
     W32K -.win32k hook.-> RING
     MPV -.polling verdict.-> RING
+    SB -.secureboot mismatch.-> RING
 ```
 
 ---
@@ -456,6 +460,76 @@ What this does **not** cover:
 - Natively 8 kHz mice push ~8 packets per 1 ms tick, which collapses this detector's effective σ resolution for those devices. The `MaxPacketsPerTick` watermark + instant Hz still catch malicious bursts above ~10 kHz, but the σ-based path is best for 1–2 kHz hardware. A future mode with `KeSetHighResolutionTimer`-backed 250 µs sampling would restore full σ resolution on 8 kHz devices.
 - An injector that rate-limits itself to one packet per 1 ms and includes artificial jitter above 60 µs can defeat this detector by construction. Combined with §7.6 (callback has to land in `mouclass.sys`) and §7.12 (`mouclass.sys .text` has to hash the same), the attack surface is pushed to "legitimate-looking packets that still enter through a legitimate callback" — at which point the HID-report MAC in the §7.13 roadmap is the right answer.
 
+### 7.15 Secure Boot ↔ TPM PCR attestation
+
+`secureboot_attest.c` answers the question competitive-integrity backends actually care about — *was Secure Boot policy really measured by firmware, or is the OS just repeating a value that user mode wrote in?* It is a direct kernel port of the FACEIT / VGK-style SB attestation shape (concept reversed from Sage-Mage's public `pcr_compare`), rewritten as a Core_ac detection module that fixes every limitation that implementation's own author called out: no classification in `DriverEntry`, fail-closed when the TPM is absent, split software claims instead of OR-ing them, use the `CONFIGURED` state for "keys enrolled, SB off," read `PCR[0]` and `PCR[14]` alongside `PCR[7]`, and keep the raw 32-byte digests rather than a boolean.
+
+Four independent sources are collected at baseline (deferred-init worker, `PASSIVE_LEVEL`):
+
+- **EFI variables.** `ExGetFirmwareEnvironmentVariable` is called with `EFI_GLOBAL_VARIABLE_GUID` (`8BE4DF61-93CA-11D2-AA0D-00E0-9803-2B8C`) for `SecureBoot` (firmware claim: `1` → on) and `SetupMode` (`1` → no Platform Key enrolled, i.e. not a production SB config even if `SecureBoot` reads `1`). Each flag lands in the report independently — `SB_FLAG_EFI_READABLE`, `SB_FLAG_EFI_ENABLED`, `SB_FLAG_EFI_SETUP_MODE`.
+- **Kernel cached view.** `ZwQuerySystemInformation(0x91)` → `SystemSecureBootInformation` packs `{ BOOLEAN enabled; BOOLEAN capable; }`. Captured as `SB_FLAG_SYSINFO_READABLE / _ENABLED / _CAPABLE`. This is the cached OS view, not a TPM quote.
+- **Registry.** `\Registry\Machine\SYSTEM\CurrentControlSet\Control\SecureBoot\State\UEFISecureBootEnabled` (`REG_DWORD`). Same class of data as the EFI var, just persisted by the OS, captured as `SB_FLAG_REGISTRY_ENABLED`.
+- **TPM 2.0 `PCR_Read`.** `ZwCreateFile` on `\Device\TPM` (falling back to `\Device\TCM`), then `ZwDeviceIoControlFile` with `CTL_CODE(FILE_DEVICE_UNKNOWN, 0x200, METHOD_BUFFERED, FILE_ANY_ACCESS)` carrying `TPM_ST_NO_SESSIONS` + `TPM_CC_PCR_Read` + one SHA-256 selection (`sizeofSelect = 3`, bit set for the index). The response parser skips the 10-byte header, `pcrUpdateCounter`, `TPML_PCR_SELECTION`, then copies the first 32-byte digest. We read three PCRs:
+
+| PCR | Role | Flag |
+|---:|---|---|
+| `0`  | CRTM / firmware measurement                                     | `SB_FLAG_PCR0_VALID` |
+| `7`  | Secure Boot policy (PK / KEK / db / dbx)                        | `SB_FLAG_PCR7_VALID`, with `SB_FLAG_PCR7_ALL_ZERO` on the smoking-gun spoof |
+| `14` | Boot authority / CustomKernelSigners                            | `SB_FLAG_PCR14_VALID`, with `SB_FLAG_BOOT_AUTHORITY_ZERO` if non-extended |
+
+The collector preserves each 32-byte digest verbatim in the report (and in the wire record) so the backend can compare against known-good quotes or a previous boot — it is never collapsed to a boolean.
+
+**Classification states** (`report.State` → `SB_STATE_*`):
+
+| State | Condition |
+|---|---|
+| `UNKNOWN`          | nothing conclusive — software readable but no TPM path and no clear capable/disabled evidence |
+| `UNSUPPORTED`      | no EFI vars, no sysinfo, no PCR7 — legacy BIOS boot, pre-UEFI firmware, or SB path entirely absent |
+| `CAPABLE_DISABLED` | sysinfo says capable (or EFI vars readable), every software claim says disabled, `SetupMode == 0` |
+| `CONFIGURED`       | PK enrolled (`SetupMode == 0`), SB readable, every software claim says disabled — "keys loaded, SB off" |
+| `ENABLED`          | at least one software claim says enabled, PCR[7] readable and non-zero, `SetupMode == 0` |
+| `PCR_MISMATCH`     | software claims enabled but PCR[7] is 32 zero bytes, OR software claims enabled and no TPM is addressable at all |
+
+**Verdict — `SB_FLAG_SUSPICIOUS` trips when:**
+
+- *Software claims enabled but PCR[7] is all zero* (`SB_FLAG_PCR7_ALL_ZERO`). PCR[7] is extended by firmware during measured boot; 32 zeroes means the measurement never happened. If the OS believes SB is on, either the EFI var / sysinfo / registry was spoofed by a bootkit / userland patch, or the TPM is being answered by something that will return whatever is asked for.
+- *Software claims enabled and no TPM is present* (`SB_FLAG_OS_CLAIMS_NO_HARDWARE`). A Secure-Boot-enabled Windows install without a TPM is not a normal shape; it is what you see when the attestation hardware has been disabled or hidden from the OS. The earlier PoC left this path producing `ENABLED` from EFI/sysinfo alone — we fail closed.
+- *EFI vs sysinfo vs registry disagree* (`SB_FLAG_CLAIM_DISAGREEMENT`). The three software layers answer independently; if they drift from each other, the layer that drifted is itself a signal about which plumbing was tampered.
+
+**Runtime drift.** `PCR[7]` is append-only across a boot session — firmware extends it before the OS loads and nothing legitimate extends it afterwards. `SecureBootAttestVerify` re-reads PCR[7] every 30 s and diffs against the boot baseline. Any drift sets `SB_FLAG_PCR7_DRIFT | SB_FLAG_SUSPICIOUS` and routes `WIRE_REC_TAMPER(AC_TAMPER_REASON_SECUREBOOT)` — the only realistic way to see this in-session is a hypervisor / vTPM that will answer `PCR_Read` with whatever you want, which is exactly the class of attack this detector is designed to surface.
+
+**Emission.** On baseline the module emits `WIRE_REC_SECUREBOOT_REPORT` unconditionally (so the backend always has the raw state for the session) and emits `WIRE_REC_TAMPER` only when `SUSPICIOUS` is set. On verify the wire record is re-emitted only when `SUSPICIOUS` transitions *into* set or when PCR[7] drifted, so the detector stays quiet on honest hardware.
+
+**Flag bits** exposed in `secureboot_attest.h`:
+
+| Bit | Name | Meaning |
+|---:|---|---|
+| `0x00000001` | `EFI_READABLE`           | `ExGetFirmwareEnvironmentVariable(SecureBoot)` returned success |
+| `0x00000002` | `EFI_ENABLED`            | `SecureBoot` EFI byte == `1` |
+| `0x00000004` | `EFI_SETUP_MODE`         | `SetupMode` EFI byte == `1` (no PK enrolled) |
+| `0x00000008` | `SYSINFO_READABLE`       | `ZwQuerySystemInformation(0x91)` returned success |
+| `0x00000010` | `SYSINFO_ENABLED`        | `SystemSecureBootInformation.Enabled == TRUE` |
+| `0x00000020` | `SYSINFO_CAPABLE`        | `SystemSecureBootInformation.Capable == TRUE` |
+| `0x00000040` | `REGISTRY_ENABLED`       | `UEFISecureBootEnabled` DWORD != 0 |
+| `0x00000080` | `TPM_PRESENT`            | `\Device\TPM` (or `\Device\TCM`) opened |
+| `0x00000100` | `PCR0_VALID`             | `PCR[0]` SHA-256 extracted |
+| `0x00000200` | `PCR7_VALID`             | `PCR[7]` SHA-256 extracted |
+| `0x00000400` | `PCR14_VALID`            | `PCR[14]` SHA-256 extracted |
+| `0x00000800` | `PCR7_ALL_ZERO`          | `PCR[7]` digest is 32 zero bytes — Secure Boot policy never measured |
+| `0x00001000` | `PCR7_DRIFT`             | `PCR[7]` observed at runtime differs from the boot baseline |
+| `0x00002000` | `CLAIM_DISAGREEMENT`     | EFI / sysinfo / registry do not all agree on enabled vs disabled |
+| `0x00004000` | `OS_CLAIMS_NO_HARDWARE`  | software claims enabled but no TPM is addressable |
+| `0x00008000` | `BOOT_AUTHORITY_ZERO`    | `PCR[14]` (boot-authority / CustomKernelSigners) is 32 zero bytes |
+| `0x00010000` | `SUSPICIOUS`             | composite verdict — at least one of the mismatch conditions held |
+
+**What this closes that an EFI-only check cannot.** Anything that only reads `SecureBoot` / `SystemSecureBootInformation` / `UEFISecureBootEnabled` is reading software-visible state. All three can be made to agree while the boot measurements never happened — a bootkit, a kernel patch applied before Core_ac loads, or a spoofed userland response to the service's own query. PCR[7] is written by firmware before the boot manager hands off, and a hypervisor / vTPM that answers `PCR_Read` with whatever is asked can be caught by the runtime drift check (a real TPM's PCR[7] does not change inside a boot session). This is the same idea FACEIT / VGK-style attestation is already built around; moving it in-driver means the measurement is read where the attacker cannot sit between the OS and the attestation hardware through a userland shim.
+
+**What this does not cover yet** (tracked in §17):
+
+- No quote. A raw `PCR_Read` is local and replayable. Binding PCR[7] to the EK name (`0x81010001`) through `TPM2_Quote` is the next step — the same `ReadPublic` / name-parse plumbing is already present in the reference implementation and will land as `secureboot_attest`'s next pass.
+- No TCG event log parse. A non-zero `PCR[7]` only says *something* was extended. The `EV_EFI_VARIABLE_AUTHORITY` / `db` / `dbx` events are what tell you *what* was measured; replaying them against the running digest is how a backend upgrades from "the SB bank is not empty" to "the SB bank contains the policy this machine is supposed to be on."
+- No "same-as-last-boot" baseline. The driver captures the boot digest; comparing it against a backend-persisted previous-boot value catches a quiet policy swap (PCR[7] non-zero both times, but different) that the local check cannot see.
+
 ---
 
 ## 8. Wire protocol
@@ -503,6 +577,7 @@ Payload types in this build:
 | `0x5A` | `PAGE_WALK_ANOMALY` | `WIRE_PAGE_WALK_ANOMALY` |
 | `0x5B` | `WIN32K_HOOK` | `WIRE_WIN32K_HOOK` |
 | `0x5C` | `MOUSE_POLLING` | `WIRE_MOUSE_POLLING` |
+| `0x5D` | `SECUREBOOT_REPORT` | `WIRE_SECUREBOOT_REPORT` |
 
 Tamper reason codes carried by `WIRE_TAMPER.Reason`:
 
@@ -523,6 +598,7 @@ Tamper reason codes carried by `WIRE_TAMPER.Reason`:
 | `0x100D` | `W32K_SYNTHMOUSE` | `win32kbase!SynthesizeMouseInput` sample hash drifted, jmp-shaped prologue, or module shifted |
 | `0x100E` | `W32K_APC_INJECT` | reserved: APC queued to a GUI thread with a `NormalRoutine` outside a trusted kernel module |
 | `0x100F` | `MOUSE_POLLING`  | Mouclass write-pointer sampling returned σ ≤ 15 µs, burst rate ≥ 20 %, instant Hz > 10 000, or > 20 packets in one 1 ms tick |
+| `0x1010` | `SECUREBOOT`     | Secure Boot ↔ TPM PCR cross-check: PCR[7] all-zero while OS claims SB on, OS claims SB on without a TPM, EFI/sysinfo/registry disagreement, or runtime PCR[7] drift |
 
 User mode drains the ring by issuing `IOCTL_AC_EVENT_POLL` with an output buffer; the driver copies as many whole records as fit and returns the byte count via `IoStatus.Information`.
 
@@ -550,6 +626,8 @@ User mode drains the ring by issuing `IOCTL_AC_EVENT_POLL` with an output buffer
 | `0x810` | `IOCTL_AC_REPORT_WINDOW` | `OVERLAY_WINDOW_REPORT` in | Push one window's PID/HWND/style/ex-style/class/title for overlay evaluation |
 | `0x811` | `IOCTL_AC_QUERY_OVERLAY_FLAG` | 4 B out | Read the current `g_OverlayFlag` bitmap |
 | `0x812` | `IOCTL_AC_QUERY_DMA_FLAG`     | 4 B out | Read the current `g_DmaFlag` bitmap |
+| `0x813` | `IOCTL_AC_QUERY_SECUREBOOT_FLAG`   | 4 B out | Read the current `SB_FLAG_*` bitmap |
+| `0x814` | `IOCTL_AC_QUERY_SECUREBOOT_REPORT` | `SECUREBOOT_ATTEST_REPORT` out | Pull the full Secure Boot / TPM PCR report (flags, state, PCR[0]/PCR[7]/PCR[14] digests, PCR[7] baseline) |
 
 Blob slots are keyed by `CHANNEL_BLOB_KIND`, replaced in place on a repeat push, and read back by subsystems via `ChannelGetBlob` or the suffix-match helper `ChannelBlobEqualsW`.
 
@@ -684,6 +762,9 @@ Suggested next steps for anyone taking this further:
 - Extend `input_integrity` to HIDClass filter chains (gamepads / tablet drivers) once the per-device-type extension layout is codified.
 - Add signature-based device-namespace enumeration (`\Device\{GUID}` lookups) to flag drivers that create devices named with raw GUIDs under drivers not covered by a trusted vendor whitelist.
 - Promote the overlay detector from companion-driven window reports to a direct kernel walk of `tagWND` through `PsGetProcessWin32Process`, so the detector covers windows the companion cannot see (hidden toplevel, cross-session, injected via `NtUserCreateWindowEx` from a sandboxed process).
+- Finish the EK-bound quote path in `secureboot_attest`: build a `TPM2_ReadPublic` for `0x81010001`, cache the EK `TPM2B_NAME`, and issue `TPM2_Quote` over PCR[0] / PCR[7] / PCR[14] so the backend can verify the digests against the EK rather than trusting a raw `PCR_Read` — the plumbing in `pcr_compare`'s reference port already parses the name blob.
+- Parse the TCG EFI event log in `secureboot_attest` and replay `EV_EFI_VARIABLE_AUTHORITY` / `db` / `dbx` events against the observed PCR[7] digest. A non-zero PCR[7] only means something was extended; the event log tells the backend *what* policy was measured.
+- Persist the boot PCR[7] baseline per HWID at the backend and feed it back through `IOCTL_AC_PUSH_HASH`; `secureboot_attest` then raises a mismatch when PCR[7] does not match the prior boot for the same machine — catches a quiet policy swap that the in-session check cannot see.
 
 ---
 

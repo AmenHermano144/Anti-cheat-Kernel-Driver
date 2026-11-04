@@ -27,3 +27,4 @@ Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\page_walker.c;Z:\!NIMRODCORE
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\image_backing.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\image_backing.obj
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\win32k_guard.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\win32k_guard.obj
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\mouse_polling.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\mouse_polling.obj
+Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\secureboot_attest.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\secureboot_attest.obj

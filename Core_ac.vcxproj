@@ -116,6 +116,7 @@
     <ClCompile Include="src\image_backing.c" />
     <ClCompile Include="src\win32k_guard.c" />
     <ClCompile Include="src\mouse_polling.c" />
+    <ClCompile Include="src\secureboot_attest.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\core.h" />
@@ -148,6 +149,7 @@
     <ClInclude Include="src\image_backing.h" />
     <ClInclude Include="src\win32k_guard.h" />
     <ClInclude Include="src\mouse_polling.h" />
+    <ClInclude Include="src\secureboot_attest.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

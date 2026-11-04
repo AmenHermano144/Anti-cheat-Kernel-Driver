@@ -21,6 +21,7 @@
 #include "image_backing.h"
 #include "win32k_guard.h"
 #include "mouse_polling.h"
+#include "secureboot_attest.h"
 
 CORE_AC_GLOBAL g_Core;
 
@@ -133,6 +134,9 @@ static VOID CoreDeferredInit(PVOID Context)
     (VOID)MousePollingInit();
     (VOID)MousePollingDiscoverDevices();
     (VOID)MousePollingStart();
+
+    (VOID)SecureBootAttestInit();
+    (VOID)SecureBootAttestBaseline();
 
     status = CoreStartWorker();
     if (!NT_SUCCESS(status)) { CORE_LOG("StartWorker failed: 0x%08X", status); goto fail; }
@@ -373,6 +377,7 @@ static VOID CorePollWorker(PVOID Context)
             (VOID)ImageBackingVerify();
             (VOID)Win32kGuardVerify();
             (VOID)MousePollingVerify();
+            (VOID)SecureBootAttestVerify();
             (VOID)ChannelFlushPending();
         }
 
@@ -407,6 +412,7 @@ VOID CoreDriverUnload(PDRIVER_OBJECT DriverObject)
     CoreUnregisterCallbacks();
     HookAuditUnregisterCallbacks();
     AcTamperDisarm();
+    SecureBootAttestShutdown();
     MousePollingShutdown();
     Win32kGuardShutdown();
     ImageBackingShutdown();

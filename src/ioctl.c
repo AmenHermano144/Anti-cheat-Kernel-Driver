@@ -7,6 +7,7 @@
 #include "strings.h"
 #include "overlay_detect.h"
 #include "dma_detect.h"
+#include "secureboot_attest.h"
 
 static NTSTATUS CompleteIrp(PIRP Irp, NTSTATUS Status, ULONG Info)
 {
@@ -126,6 +127,32 @@ static NTSTATUS HandleQueryDmaFlag(PVOID buf, ULONG inLen, ULONG outLen, ULONG *
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS HandleQuerySecureBootFlag(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(inLen);
+    *written = 0;
+    if (!buf || outLen < sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
+    ULONG value = SecureBootAttestGetFlag();
+    RtlCopyMemory(buf, &value, sizeof(value));
+    *written = sizeof(value);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS HandleQuerySecureBootReport(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
+{
+    UNREFERENCED_PARAMETER(inLen);
+    *written = 0;
+    if (!buf || outLen < sizeof(SECUREBOOT_ATTEST_REPORT)) return STATUS_INVALID_PARAMETER;
+
+    SECUREBOOT_ATTEST_REPORT rep;
+    NTSTATUS s = SecureBootAttestCopyReport(&rep);
+    if (!NT_SUCCESS(s)) return s;
+
+    RtlCopyMemory(buf, &rep, sizeof(rep));
+    *written = sizeof(rep);
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS CoreIoctlDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     UNREFERENCED_PARAMETER(DeviceObject);
@@ -195,6 +222,12 @@ NTSTATUS CoreIoctlDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         break;
     case IOCTL_AC_QUERY_DMA_FLAG:
         s = HandleQueryDmaFlag(buf, inLen, outLen, &written);
+        break;
+    case IOCTL_AC_QUERY_SECUREBOOT_FLAG:
+        s = HandleQuerySecureBootFlag(buf, inLen, outLen, &written);
+        break;
+    case IOCTL_AC_QUERY_SECUREBOOT_REPORT:
+        s = HandleQuerySecureBootReport(buf, inLen, outLen, &written);
         break;
     default:
         break;

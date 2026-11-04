@@ -28,6 +28,7 @@
 #define WIRE_REC_PAGE_WALK_ANOMALY 0x5A
 #define WIRE_REC_WIN32K_HOOK    0x5B
 #define WIRE_REC_MOUSE_POLLING  0x5C
+#define WIRE_REC_SECUREBOOT_REPORT 0x5D
 #define WIRE_REC_TEARDOWN       0x02
 
 #define MP_VERDICT_WAITING      0
@@ -315,4 +316,28 @@ typedef struct _WIRE_MOUSE_POLLING
     ULONG   Flags;
     ULONG   Reserved;
 } WIRE_MOUSE_POLLING, *PWIRE_MOUSE_POLLING;
+
+typedef struct _WIRE_SECUREBOOT_REPORT
+{
+    ULONG   Flags;
+    ULONG   State;
+    UCHAR   EfiReadable;
+    UCHAR   EfiEnabled;
+    UCHAR   SetupMode;
+    UCHAR   SysinfoReadable;
+    UCHAR   SysinfoEnabled;
+    UCHAR   SysinfoCapable;
+    UCHAR   RegistryEnabled;
+    UCHAR   TpmPresent;
+    UCHAR   Pcr0Valid;
+    UCHAR   Pcr7Valid;
+    UCHAR   Pcr14Valid;
+    UCHAR   Pcr7AllZero;
+    UCHAR   Pcr7Drift;
+    UCHAR   Reserved[3];
+    UCHAR   Pcr0Sha256[32];
+    UCHAR   Pcr7Sha256[32];
+    UCHAR   Pcr14Sha256[32];
+    UCHAR   Pcr7Baseline[32];
+} WIRE_SECUREBOOT_REPORT, *PWIRE_SECUREBOOT_REPORT;
 #pragma pack(pop)

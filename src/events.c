@@ -188,3 +188,10 @@ NTSTATUS EventsReportMousePolling(const WIRE_MOUSE_POLLING *rec)
     if (!rec) return STATUS_INVALID_PARAMETER;
     return ChannelEnqueueRecord(WIRE_REC_MOUSE_POLLING, rec, sizeof(*rec));
 }
+
+NTSTATUS EventsReportSecureBootReport(const WIRE_SECUREBOOT_REPORT *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_SECUREBOOT_REPORT, rec, sizeof(*rec));
+}
