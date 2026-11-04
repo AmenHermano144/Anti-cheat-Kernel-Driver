@@ -12,12 +12,13 @@ typedef struct _INPUT_CALLBACK_SLOT
 {
     volatile LONG   InUse;
     UCHAR           Class;
+    BOOLEAN         BaselineOutOfRange;
     PDEVICE_OBJECT  UpperDevice;
     PDEVICE_OBJECT  ClassDevice;
     PULONG_PTR      SlotAddress;
     ULONG64         ExpectedCallback;
-    ULONG64         ExpectedModuleBase;
-    ULONG           ExpectedModuleSize;
+    ULONG64         AllowedModuleStart;
+    ULONG64         AllowedModuleEnd;
 } INPUT_CALLBACK_SLOT, *PINPUT_CALLBACK_SLOT;
 
 static INPUT_CALLBACK_SLOT g_Slots[INPUT_INTG_MAX_SLOTS];
@@ -90,7 +91,8 @@ static VOID AddSlot(UCHAR classId,
                     PDEVICE_OBJECT upperDevice,
                     PDEVICE_OBJECT classDevice,
                     PULONG_PTR slotAddr,
-                    ULONG64 callback)
+                    ULONG64 callback,
+                    PDRIVER_OBJECT classDriver)
 {
     LONG used = InterlockedCompareExchange(&g_SlotsUsed, 0, 0);
     if (used >= INPUT_INTG_MAX_SLOTS) return;
@@ -103,14 +105,28 @@ static VOID AddSlot(UCHAR classId,
     slot->SlotAddress = slotAddr;
     slot->ExpectedCallback = callback;
 
-    ULONG64 modBase = 0;
-    ULONG   modSize = 0;
-    if (KldrAddressBelongsToKnownModule((PVOID)callback))
+    ULONG64 modStart = classDriver ? (ULONG64)classDriver->DriverStart : 0;
+    ULONG64 modEnd   = (classDriver && classDriver->DriverSize)
+                        ? modStart + (ULONG64)classDriver->DriverSize : 0;
+    slot->AllowedModuleStart = modStart;
+    slot->AllowedModuleEnd   = modEnd;
+
+    BOOLEAN inRange = (modStart && modEnd && callback >= modStart && callback < modEnd);
+    slot->BaselineOutOfRange = !inRange;
+
+    if (!inRange)
     {
-        modBase = callback;
+        WIRE_INPUT_HIJACK rec;
+        RtlZeroMemory(&rec, sizeof(rec));
+        rec.DeviceObject = (ULONG64)classDevice;
+        rec.SlotAddress = (ULONG64)slotAddr;
+        rec.ExpectedCallback = callback;
+        rec.ObservedCallback = callback;
+        rec.ObservedCallbackModuleBase = KldrAddressBelongsToKnownModule((PVOID)callback) ? callback : 0;
+        rec.DeviceClass = classId;
+        (VOID)EventsReportInputHijack(&rec);
+        (VOID)EventsReportTamper(AC_TAMPER_REASON_INPUT, (PVOID)(ULONG_PTR)callback);
     }
-    slot->ExpectedModuleBase = modBase;
-    slot->ExpectedModuleSize = modSize;
 
     InterlockedExchange(&slot->InUse, 1);
     InterlockedIncrement(&g_SlotsUsed);
@@ -138,7 +154,7 @@ static VOID DiscoverClass(const WCHAR *upperName, const WCHAR *classDriverName, 
             ULONG64 callback = 0;
             if (LocateCallbackSlot(upper, classDevice, classDrv, &slotAddr, &callback))
             {
-                AddSlot(classId, upper, classDevice, slotAddr, callback);
+                AddSlot(classId, upper, classDevice, slotAddr, callback, classDrv);
             }
             classDevice = classDevice->NextDevice;
         }
@@ -200,10 +216,15 @@ NTSTATUS InputIntegrityVerify(VOID)
             continue;
         }
 
-        if (observed == slot->ExpectedCallback) continue;
+        BOOLEAN drifted = (observed != slot->ExpectedCallback);
+        BOOLEAN inRange = (slot->AllowedModuleStart && slot->AllowedModuleEnd &&
+                           observed >= slot->AllowedModuleStart &&
+                           observed <  slot->AllowedModuleEnd);
+
+        if (!drifted && inRange) continue;
+        if (!drifted && slot->BaselineOutOfRange) continue;
 
         BOOLEAN stillBacked = KldrAddressBelongsToKnownModule((PVOID)observed);
-        if (stillBacked && slot->ExpectedModuleBase != 0) continue;
 
         WIRE_INPUT_HIJACK rec;
         RtlZeroMemory(&rec, sizeof(rec));

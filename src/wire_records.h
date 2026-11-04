@@ -26,7 +26,30 @@
 #define WIRE_REC_OVERLAY_DETECT 0x58
 #define WIRE_REC_DMA_HIT        0x59
 #define WIRE_REC_PAGE_WALK_ANOMALY 0x5A
+#define WIRE_REC_WIN32K_HOOK    0x5B
+#define WIRE_REC_MOUSE_POLLING  0x5C
 #define WIRE_REC_TEARDOWN       0x02
+
+#define MP_VERDICT_WAITING      0
+#define MP_VERDICT_NATURAL      1
+#define MP_VERDICT_SUSPICIOUS   2
+#define MP_VERDICT_INJECTION    3
+
+#define MP_FLAG_LOW_STDDEV            0x00000001
+#define MP_FLAG_HIGH_BURST            0x00000002
+#define MP_FLAG_SUPER_HIGH_HZ         0x00000004
+#define MP_FLAG_MONSTER_BURST         0x00000008
+#define MP_FLAG_QUEUE_LAYOUT_BAD      0x00000010
+#define MP_FLAG_PACKET_COUNT_VAR      0x00000020
+
+#define W32K_FN_SYNTH_MOUSE       1
+#define W32K_FN_SYNTH_KEYBOARD    2
+
+#define W32K_HOOK_FLAG_HASH_DRIFT       0x0001
+#define W32K_HOOK_FLAG_JMP_PROLOGUE     0x0002
+#define W32K_HOOK_FLAG_RESOLVE_FAILED   0x0004
+#define W32K_HOOK_FLAG_MODULE_SHIFTED   0x0008
+#define W32K_HOOK_FLAG_READ_FAILED      0x0010
 
 #define PW_ANOM_PARSE_FAIL        0x00000001
 #define PW_ANOM_RWX               0x00000002
@@ -263,4 +286,33 @@ typedef struct _WIRE_PAGE_WALK_ANOMALY
     USHORT  ImagePathLen;
     UCHAR   ImagePath[520];
 } WIRE_PAGE_WALK_ANOMALY, *PWIRE_PAGE_WALK_ANOMALY;
+
+typedef struct _WIRE_WIN32K_HOOK
+{
+    ULONG64 FunctionAddress;
+    ULONG64 Win32kBase;
+    ULONG   Win32kSize;
+    ULONG   FunctionId;
+    ULONG   Flags;
+    ULONG   Reserved;
+    UCHAR   BaselineHash[32];
+    UCHAR   ObservedHash[32];
+    UCHAR   ObservedFirstBytes[32];
+} WIRE_WIN32K_HOOK, *PWIRE_WIN32K_HOOK;
+
+typedef struct _WIRE_MOUSE_POLLING
+{
+    ULONG64 DeviceObject;
+    ULONG64 TotalPackets;
+    ULONG64 TotalBursts;
+    ULONG   InstantHz;
+    ULONG   WindowAvgMicros;
+    ULONG   WindowStdDevMicros;
+    ULONG   WindowBurstRateBp;
+    ULONG   WindowMaxPacketsPerTick;
+    ULONG   FilledSamples;
+    ULONG   Verdict;
+    ULONG   Flags;
+    ULONG   Reserved;
+} WIRE_MOUSE_POLLING, *PWIRE_MOUSE_POLLING;
 #pragma pack(pop)

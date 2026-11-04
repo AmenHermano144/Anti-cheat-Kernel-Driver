@@ -174,3 +174,17 @@ NTSTATUS EventsReportPageWalkAnomaly(const WIRE_PAGE_WALK_ANOMALY *rec)
     if (!rec) return STATUS_INVALID_PARAMETER;
     return ChannelEnqueueRecord(WIRE_REC_PAGE_WALK_ANOMALY, rec, sizeof(*rec));
 }
+
+NTSTATUS EventsReportWin32kHook(const WIRE_WIN32K_HOOK *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_WIN32K_HOOK, rec, sizeof(*rec));
+}
+
+NTSTATUS EventsReportMousePolling(const WIRE_MOUSE_POLLING *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_MOUSE_POLLING, rec, sizeof(*rec));
+}

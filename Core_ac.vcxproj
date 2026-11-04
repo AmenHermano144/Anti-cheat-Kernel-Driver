@@ -114,6 +114,8 @@
     <ClCompile Include="src\dma_detect.c" />
     <ClCompile Include="src\page_walker.c" />
     <ClCompile Include="src\image_backing.c" />
+    <ClCompile Include="src\win32k_guard.c" />
+    <ClCompile Include="src\mouse_polling.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\core.h" />
@@ -144,6 +146,8 @@
     <ClInclude Include="src\dma_detect.h" />
     <ClInclude Include="src\page_walker.h" />
     <ClInclude Include="src\image_backing.h" />
+    <ClInclude Include="src\win32k_guard.h" />
+    <ClInclude Include="src\mouse_polling.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

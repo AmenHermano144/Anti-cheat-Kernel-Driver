@@ -20,36 +20,31 @@ Core_ac is structured so each of those three qualities can be audited independen
 
 ## 2. Architecture at a glance
 
-```
-                      ┌──────────────────────────────────────────────┐
-                      │              DriverEntry (sync)              │
-                      │  ├─ init boot cookie (XOR pair)              │
-                      │  ├─ env gates (SafeBoot / debugger)          │
-                      │  └─ queue deferred init worker               │
-                      └──────────────────┬───────────────────────────┘
-                                         │
-                                         ▼
-   ┌─────────────────────────────────────────────────────────────────────────┐
-   │                        Deferred init worker (passive)                   │
-   │  IoCreateDevice ──► \Device\CoreAC + \??\CoreAC (symlink)               │
-   │  IoCreateDevice ──► \Device\CoreAC_EVT (event poll surface)             │
-   │  ObSetSecurity   ──► DACL: SYSTEM + Admins only                         │
-   │  ChannelInit  CryptoInit  EventsInit                                    │
-   │  AcTamperArm (LSTAR snapshot)   NmiWatchdogRegister                     │
-   │  PsSetLoadImageNotifyRoutineEx (fallback: non-Ex)                       │
-   │  PsSetCreateProcessNotifyRoutineEx                                      │
-   │  KldrSnapshotModules  Pml4InitSnapshot                                  │
-   │  ByovdScannerInit  GameIntegrityInit  HwidCollectBoot                   │
-   │  ExecRegionScanInit / Snapshot        (big pool executable baseline)    │
-   │  InputIntegrityInit / Snapshot        (Mou/Kbd service callbacks)       │
-   │  TamperRootkitInit / Snapshot         (PiDDB + MmUnloadedDrivers)       │
-   │  HookAuditInit / RegisterCallbacks    (CreateThreadNotify + ObReg)      │
-   │  OverlayDetectInit                    (window-flag + parent-chain flag) │
-   │  PsCreateSystemThread ──► CorePollWorker (heartbeat timer loop)         │
-   └─────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    classDef sync    fill:#1f2937,stroke:#f59e0b,color:#f3f4f6,stroke-width:2px
+    classDef passive fill:#0f172a,stroke:#38bdf8,color:#e0f2fe,stroke-width:1px
+    classDef hot     fill:#1e293b,stroke:#f472b6,color:#fce7f3,stroke-width:1px
+    classDef sink    fill:#0b1120,stroke:#4ade80,color:#dcfce7,stroke-width:2px
+
+    DE["DriverEntry (sync)<br/>boot cookie · env gates · spawn worker"]:::sync
+    DEF["Deferred init worker (PASSIVE_LEVEL)"]:::passive
+    DEV["IoCreateDevice<br/>\\Device\\CoreAC + CoreAC_EVT<br/>DACL: SYSTEM + Admins"]:::passive
+    SVC["ChannelInit · CryptoInit · EventsInit<br/>AcTamperArm (LSTAR) · NmiWatchdogRegister"]:::passive
+    NTF["PsSetLoadImageNotifyRoutineEx<br/>PsSetCreateProcessNotifyRoutineEx"]:::passive
+    SNAP["KldrSnapshotModules · Pml4InitSnapshot<br/>ExecRegionScanSnapshot · InputIntegritySnapshot<br/>TamperRootkitSnapshot · HookAuditInit<br/>OverlayDetectInit · DmaDetectSnapshot<br/>ImageBackingBaseline (page-walker)"]:::passive
+
+    WORKER["CorePollWorker<br/>30 s heartbeat loop"]:::hot
+    RING[("SPSC wire ring<br/>IOCTL_AC_EVENT_POLL")]:::sink
+
+    DE --> DEF
+    DEF --> DEV --> SVC --> NTF --> SNAP --> WORKER
+    WORKER -.heartbeat.-> RING
+    NTF -.image/process notifies.-> RING
+    SNAP -.late BYOVD / anomaly.-> RING
 ```
 
-Only `DriverEntry` runs synchronously. Device registration, callback installation, and detection pipelines boot from a worker so static analysis of the entry point never reveals the full surface.
+Only `DriverEntry` runs synchronously. Device registration, callback installation, and detection pipelines boot from a worker so static analysis of the entry point never reveals the full surface. Every detection module ultimately pushes typed records into the SPSC ring, which user mode drains through `IOCTL_AC_EVENT_POLL`.
 
 ---
 
@@ -80,6 +75,10 @@ Only `DriverEntry` runs synchronously. Device registration, callback installatio
 | `hook_audit.{c,h}` | `PsSetCreateThreadNotifyRoutine` + `ObRegisterCallbacks` + user-image heuristic over protected game PIDs; emits `HOOK_AUDIT` / `HANDLE_AUDIT` for the `SetWindowsHookEx` / `SetProp[2]` abuse surface Vanguard captures through SSDT detours |
 | `overlay_detect.{c,h}` | Overlay detector: parses window extended-style flags pushed from the companion, walks the owner's parent chain (built from `PsSetCreateProcessNotifyRoutineEx`), checks for a whitelisted shell ancestor, matches cheat-style class names, and sets bits on a module-wide flag variable; emits `OVERLAY_DETECT` |
 | `dma_detect.{c,h}` | DMA-card detector: enumerates PCI config space via `HalGetBusDataByOffset`, fingerprints known DMA FPGA VID:DID (pcileech-fpga / Screamer / LeetDMA / Captain-DMA / ZDMA), walks the PCIe extended capability chain for a zeroed Device Serial Number, cross-checks against the `\Driver\pci` PDO list for hidden devices, and diffs each heartbeat scan against a boot baseline for hot-plug / header-type mutation; emits `DMA_HIT` |
+| `page_walker.{c,h}` | Read-only x64 page-table walker (PML5/PML4/PDPT/PD/PT) via `MmCopyMemory(MM_COPY_MEMORY_PHYSICAL)`; detects LA57, MAXPHYADDR; resolves VA→PA with accumulated R/W/U/NX flags; handles 4K / 2M / 1G leaves; exposes `PwReadVirtualRange` for gap-tolerant VA reads |
+| `image_backing.{c,h}` | Image-backing integrity scanner driven by `page_walker`: per-module PE parse through physical reads, SHA-256 of the first executable section, per-leaf classification (RWX, writable .text, NX cleared, large-page backing), hole-ratio and hash-drift diff vs. the boot baseline; emits `PAGE_WALK_ANOMALY` |
+| `win32k_guard.{c,h}` | Session-space inline-hook detector for `win32kbase!SynthesizeMouseInput`: attaches to a GUI session process (winlogon / explorer) so win32k is addressable, pattern-locates the function, hashes a 256-byte sample via `page_walker`, diffs each heartbeat; also flags a jmp-shaped prologue (`E9 ??`, `FF 25`, `mov rax, imm64; jmp rax`); emits `WIN32K_HOOK` |
+| `mouse_polling.{c,h}` | Passive polling-statistics detector inspired by Vanguard's anti-Macku / anti-KMBox check: a 1 ms `KTIMER` + DPC samples each `MouClass` device's `DeviceExtension.WritePointer` without hooking anything, derives per-packet Δt, rolls a 100-sample window, and computes σ, burst rate (Δt < 0.5 ms), instant Hz, and max-packets-per-tick; emits `MOUSE_POLLING` with verdict `WAITING` / `NATURAL` / `SUSPICIOUS` / `INJECTION` |
 | `usermod.{c,h}` | User-mode module walker (PEB `InLoadOrderModuleList`) |
 | `strings.{c,h}` | Kernel-safe string primitives, FNV1a 32/64, memmem, hex formatter |
 | `core.h` | Shared types, pool tags, device names, status codes |
@@ -122,24 +121,55 @@ DriverEntry
         ├─ HookAuditInit + RegisterCallbacks   PsSetCreateThreadNotifyRoutine + ObRegisterCallbacks
         ├─ OverlayDetectInit()                 pid→parent map + overlay flag variable
         ├─ DmaDetectInit + Snapshot            PCI config-space + \Driver\pci PDO baseline
+        ├─ ImageBackingInit + Baseline         page-walker baseline: PE hash + per-leaf flags
+        ├─ Win32kGuardInit + Baseline          win32kbase!SynthesizeMouseInput prolog hash
+        ├─ MousePollingInit + DiscoverDevices  mouclass write-pointer snapshot, start 1 ms DPC
         └─ CoreStartWorker()                   30 s heartbeat loop
-
-Heartbeat tick (every 30 s):
-
 ```
-NmiWatchdogRequestCrossCpuSweep       cross-CPU LSTAR/DEBUGCTL via HalSendNMI
-AcTamperDrainNmiFlags → event         replay violations observed in NMI context
-EventsEmitHeartbeat                   WIRE_REC_HEARTBEAT
-Pml4Rescan                            system CR3 + each registered game CR3
-KldrDiffScan                          FNV1a64 diff + BYOVD late scan
-ExecRegionScanDiff                    non-paged big pool outside known modules
-InputIntegrityVerify                  class service callback slot vs. snapshot
-TamperRootkitVerify                   PiDDBCacheTable / MmUnloadedDrivers mutation
-                                      hook_audit records flow directly from the
-                                      thread notify + ObReg pre-op + image-load path
-DmaDetectVerify                       full PCI config-space sweep + PDO diff vs. baseline
-ChannelFlushPending                   drain any deferred producers
-```
+
+The heartbeat loop then fans out every 30 s into one documented producer per detector, each of which writes typed records into the SPSC ring:
+
+```mermaid
+flowchart LR
+    classDef tick fill:#0f172a,stroke:#38bdf8,color:#e0f2fe,stroke-width:2px
+    classDef det  fill:#1e293b,stroke:#f472b6,color:#fce7f3,stroke-width:1px
+    classDef nmi  fill:#1f2937,stroke:#f59e0b,color:#fde68a,stroke-width:1px
+    classDef ring fill:#0b1120,stroke:#4ade80,color:#dcfce7,stroke-width:2px
+
+    T["Heartbeat tick (30 s)"]:::tick
+
+    NMI1["NmiWatchdogRequestCrossCpuSweep<br/>cross-CPU LSTAR / DEBUGCTL"]:::nmi
+    NMI2["AcTamperDrainNmiFlags<br/>replay NMI-context violations"]:::nmi
+    HB["EventsEmitHeartbeat"]:::det
+    PML["Pml4Rescan<br/>system CR3 + game CR3s"]:::det
+    KL["KldrDiffScan<br/>FNV1a64 diff + late BYOVD"]:::det
+    EX["ExecRegionScanDiff<br/>big-pool exec regions"]:::det
+    IN["InputIntegrityVerify<br/>Mou/Kbd slot drift"]:::det
+    TR["TamperRootkitVerify<br/>PiDDB · MmUnloadedDrivers"]:::det
+    DMA["DmaDetectVerify<br/>PCI sweep + PDO diff"]:::det
+    PW["ImageBackingVerify<br/>page-walker per-module scan"]:::det
+    W32K["Win32kGuardVerify<br/>SMI prolog hash + jmp detect"]:::det
+    MPV["MousePollingVerify<br/>jitter window · σ · burst rate"]:::det
+    HA["hook_audit (async)<br/>thread notify · ObReg · image load"]:::det
+    MPD["mouse_polling DPC (1 ms)<br/>passive WritePointer sampling"]:::det
+    FLUSH["ChannelFlushPending"]:::det
+
+    RING[("SPSC wire ring")]:::ring
+
+    T --> NMI1 --> NMI2 --> HB --> PML --> KL --> EX --> IN --> TR --> DMA --> PW --> W32K --> MPV --> FLUSH
+    MPD -.updates window-.-> MPV
+    HA -.-> RING
+    NMI2 -.-> RING
+    HB -.-> RING
+    PML -.anomaly.-> RING
+    KL -.BYOVD hit.-> RING
+    EX -.unbacked exec.-> RING
+    IN -.input hijack.-> RING
+    TR -.PiDDB / MmUnloaded.-> RING
+    DMA -.DMA hit.-> RING
+    PW -.page-walk anomaly.-> RING
+    W32K -.win32k hook.-> RING
+    MPV -.polling verdict.-> RING
 ```
 
 ---
@@ -205,9 +235,14 @@ Capped at 32 hits per pass to prevent telemetry floods.
 
 ### 7.6 Input class callback integrity
 
-`input_integrity.c` references `\Driver\MouHID`, `\Driver\KbdHid` and `\Driver\i8042prt`, walks each upper device's `AttachedDevice` chain, and for every paired `\Driver\MouClass` / `\Driver\KbdClass` device scans the upper device's `DeviceExtension`. When it finds a slot whose value equals the class `PDEVICE_OBJECT` and whose next slot points above the class `PDRIVER_OBJECT`, that next slot holds the service callback. The slot address and its current value are snapshotted.
+`input_integrity.c` references `\Driver\MouHID`, `\Driver\KbdHid` and `\Driver\i8042prt`, walks each upper device's `AttachedDevice` chain, and for every paired `\Driver\MouClass` / `\Driver\KbdClass` device scans the upper device's `DeviceExtension`. When it finds a slot whose value equals the class `PDEVICE_OBJECT` and whose next slot points above the class `PDRIVER_OBJECT`, that next slot holds the service callback. The slot address, the current value, **and the owning class driver's `DriverStart`/`DriverSize`** are snapshotted.
 
-At each heartbeat the slot is re-read under `__try/__except`. If the pointer no longer matches the snapshot and does not land inside any module known at boot, a `WIRE_REC_INPUT_HIJACK` is emitted along with a `WIRE_REC_TAMPER(AC_TAMPER_REASON_INPUT)`.
+Two independent anomalies are emitted:
+
+- **Baseline out-of-range.** The baseline callback pointer must live inside the matching class driver's image (`mouclass.sys` for mouse slots, `kbdclass.sys` for keyboard slots). If an attacker hooks the slot *before* Core_ac loads — modern synthetic-input drivers do this intentionally so drift-only detectors stay silent — the discovered pointer points at the attacker's driver instead. We raise `WIRE_REC_INPUT_HIJACK` + `WIRE_REC_TAMPER(AC_TAMPER_REASON_INPUT)` immediately at `InputIntegritySnapshot` time with observed == expected (the drift is zero, but the geometry is already wrong).
+- **Runtime drift.** On every heartbeat the slot is re-read under `__try/__except`; anything that no longer equals the snapshot and no longer lands inside the class driver's range emits the same record pair.
+
+The class-driver-range check is what catches the "interceptor installed before anti-cheat" path; the drift check continues to cover the normal "cheat loaded after" case.
 
 ### 7.7 PiDDBCache / MmUnloadedDrivers mutation
 
@@ -302,6 +337,125 @@ The flag variable is exposed outside the module the same way `g_OverlayFlag` is:
 | `0x0100` | `HEADER_MISMATCH`     | Header type changed between baseline and verify on the same slot |
 | `0x1000` | `SUSPICIOUS`          | Composite verdict — at least one of the suspicious conditions held |
 
+### 7.12 Page-walker image backing
+
+`page_walker.c` + `image_backing.c` answer "what is actually mapped for this driver?" instead of trusting what the module list claims. The walker takes a CR3-equivalent `DirectoryTableBase`, masks PCID and cache bits with the CPU's own `MAXPHYADDR` (`CPUID 0x80000008`), detects 5-level paging from `CR4.LA57`, and walks PML5 → PML4 → PDPT → PD → PT through `MmCopyMemory(MM_COPY_MEMORY_PHYSICAL)` — a PTE is never dereferenced as a kernel pointer. R/W and U/S are AND'd along the walk; NX is OR'd; PSE leaves at PDPTE (1 GB) and PDE (2 MB) are resolved correctly and tagged as large-page backed.
+
+`image_backing` sits on top of the walker and runs three workflows:
+
+- **Boot baseline.** For every module from `EnvEnumKernelModules`, PE headers are copied through the walker, the first executable section's VA range is walked granule-by-granule, each present leaf is `PhysMemReadRaw`'d into an 8 MiB staging buffer (holes stay zeroed, deterministic hash), and `CryptoSha256` fingerprints it. The baseline entry (`ImageBase`, `SizeOfImage`, text RVA + size, hash, `LargePageBacked`, path FNV) lands in a spinlock-guarded 1024-slot table.
+- **Heartbeat verify.** Same scan path runs every 30 s. Per-module the module compares live counters against its baseline entry and the in-flight scan state; a non-zero `Flags` bitmap produces a `WIRE_PAGE_WALK_ANOMALY`.
+- **Image-load hook.** `PsSetLoadImageNotifyRoutine`'s `SystemModeImage` leg routes through `ImageBackingOnKernelImageLoad`, which scans the freshly-loaded driver, snapshots it into the baseline table, and emits an immediate `PAGE_WALK_ANOMALY` with `NEW_MODULE` set when anything is already wrong (RWX, large-page backing, parse failure, …).
+
+```mermaid
+flowchart TB
+    classDef src  fill:#1f2937,stroke:#f59e0b,color:#fde68a,stroke-width:1px
+    classDef pw   fill:#0f172a,stroke:#38bdf8,color:#e0f2fe,stroke-width:1px
+    classDef ib   fill:#1e293b,stroke:#f472b6,color:#fce7f3,stroke-width:1px
+    classDef anom fill:#450a0a,stroke:#f87171,color:#fecaca,stroke-width:2px
+    classDef ring fill:#0b1120,stroke:#4ade80,color:#dcfce7,stroke-width:2px
+
+    MOD["EnvEnumKernelModules<br/>ZwQuery(SystemModuleInformation)"]:::src
+    LDI["PsSetLoadImageNotifyRoutine<br/>(SystemModeImage)"]:::src
+
+    DTB["PwGetSystemDtb<br/>KPROCESS.DirectoryTableBase"]:::pw
+    WALK["PwWalk<br/>PML5 → PML4 → PDPT → PD → PT<br/>flags: R/W/U AND · NX OR"]:::pw
+    RD["PhysMemReadRaw<br/>MmCopyMemory(PHYS)"]:::pw
+
+    PE["Read PE headers via<br/>PwReadVirtualRange<br/>(gap-tolerant)"]:::ib
+    SCAN["Per-granule classify<br/>4K / 2M / 1G · RWX · NX · W^X"]:::ib
+    HASH["Fill 8 MiB .text staging<br/>SHA-256 over present+zero"]:::ib
+    DIFF["Compare vs baseline<br/>hash drift · hole ratio · shrink"]:::ib
+
+    RWX["RWX / W-text / NX-cleared"]:::anom
+    LP["LARGE_PAGE backed kernel image"]:::anom
+    HD["HASH_DRIFT .text"]:::anom
+    HR["HOLE_RATIO_HIGH · TEXT_MISSING"]:::anom
+    NM["NEW_MODULE"]:::anom
+    PF["PARSE_FAIL"]:::anom
+
+    RING[("WIRE_REC_PAGE_WALK_ANOMALY · 0x5A")]:::ring
+
+    MOD --> DTB
+    LDI --> DTB
+    DTB --> WALK --> RD --> PE --> SCAN --> HASH --> DIFF
+    SCAN --> RWX --> RING
+    SCAN --> LP  --> RING
+    DIFF --> HD  --> RING
+    DIFF --> HR  --> RING
+    DIFF --> NM  --> RING
+    PE   --> PF  --> RING
+```
+
+Detect-flag bits exposed in `wire_records.h`:
+
+| Bit | Name | Meaning |
+|---:|---|---|
+| `0x0001` | `PARSE_FAIL`         | PE headers unreadable or malformed through the walker |
+| `0x0002` | `RWX`                | Leaf PTE had both Writable and !NX — RWX kernel page |
+| `0x0004` | `WRITABLE_TEXT`      | Pages inside the first executable section are PTE-writable |
+| `0x0008` | `NX_CLEARED_TEXT`    | Pages inside the first executable section have NX cleared along the walk (expected; combined with Writable → RWX) |
+| `0x0010` | `HASH_DRIFT`         | SHA-256 of resident .text changed from the baseline hash |
+| `0x0020` | `TEXT_MISSING`       | At least one granule inside .text was `NotPresent` or unreadable |
+| `0x0040` | `LARGE_PAGE`         | Image backed by 2 MB / 1 GB granules — not how `MmLoadDriver` lays out images |
+| `0x0080` | `HOLE_RATIO_HIGH`    | ≥ 60 % of .text granules are missing — unload race or a badly manual-mapped stub |
+| `0x0100` | `SECTION_SHRUNK`     | Observed `SizeOfImage` dropped below the baseline value |
+| `0x0200` | `RACE_OR_UNMAPPED`   | No resident leaf found across the whole image |
+| `0x0400` | `NEW_MODULE`         | Module not present in the baseline (first-time sighting) |
+
+What this closes that the prior PML4 scanner could not:
+
+- Manual mappers that land their payload inside a legitimate module's `.text` but patch the page policy to `RWX` show up as `RWX | WRITABLE_TEXT` on the module that was co-opted, even when the patch stays inside a single PTE.
+- EFI / early boot "LARGE_PAGE" hidden drivers surface because `MmLoadDriver` never backs an image with 2 MB / 1 GB leaves — any kernel image that walks that way is anomalous by construction.
+- Rootkits that patch exported function bodies change the SHA-256 of `.text` deterministically, which trips `HASH_DRIFT` on the next 30 s verify.
+
+### 7.13 win32kbase mouse-synthesis guard
+
+Modern synthetic-input drivers reach the game through a small set of mouse-injection strategies: calling `MouseClassServiceCallback` directly with a trampolined stack frame, writing packets into mouclass's buffered data queue, forging a HID report in mouhid's device extension, completing a shadow IRP whose completion routine is `MouHid_ReadComplete`, and the terminal one — queueing a kernel APC into a GUI thread so `win32kbase!SynthesizeMouseInput` fires the packet directly. The first four all route through mouclass's service callback and are caught by §7.6 combined with §7.12 (the callback pointer has to land inside `mouclass.sys .text`, and `mouclass.sys .text` has to hash the same as it did at boot). The fifth bypasses the entire driver stack — the APC lands the synthetic packet directly in win32k's raw-input queue after every filter driver.
+
+`win32k_guard.c` closes that gap:
+
+- **Attach.** `win32kbase.sys` is a session driver — it is only visible in the loaded-module list from a thread attached to a session that has brought up win32k. `Win32kGuardBaseline` walks `SystemProcessInformation` for `winlogon.exe` (first choice; it owns the secure desktop from boot) or `explorer.exe` (fallback), takes a reference, and `KeStackAttachProcess`es onto it just long enough to read the module list.
+- **Resolve.** Pattern-scan the attached `win32kbase.sys` `.text` for the 24-byte prologue that `SynthesizeMouseInput` has carried since Windows 10 1809: `48 8B C4 48 89 58 10 48 89 70 18 48 89 78 20 55 41 54 41 55 41 56 41 57`. Store the function VA, detach, drop the reference.
+- **Baseline.** Through the page-walker, copy a 256-byte sample starting at the function VA, SHA-256 it, store both the hash and the first 16 bytes verbatim. This runs through `MmCopyMemory(MM_COPY_MEMORY_PHYSICAL)` so a non-root hypervisor cannot show us a clean read of a hooked page.
+- **Verify.** Every heartbeat the same 256-byte sample is re-walked. A hash drift sets `W32K_HOOK_FLAG_HASH_DRIFT`. A prologue that starts with `E9 ??`, `EB ??`, `FF 25 ??`, `48 B8 ?? ?? ?? ?? ?? ?? ?? ??` or `49 BB ?? ?? ?? ?? ?? ?? ?? ??` (the canonical inline-detour openings) sets `W32K_HOOK_FLAG_JMP_PROLOGUE`. A `win32kbase` image base that moved between sessions sets `W32K_HOOK_FLAG_MODULE_SHIFTED`. Any non-zero flag emits `WIRE_REC_WIN32K_HOOK` with baseline + observed hash + the first 32 bytes of the live prologue, and routes `WIRE_REC_TAMPER(AC_TAMPER_REASON_W32K_SYNTHMOUSE)`.
+
+What this does **not** cover yet, and is scheduled next:
+
+- **APC injection detection.** The cheat does not need to hook `SynthesizeMouseInput` — it calls the pristine function from a GUI thread that it reached via a kernel APC. Detecting that requires walking the ApcState of the target thread, which depends on undocumented offsets; the record type `0x100E W32K_APC_INJECT` is already reserved in `anti_tamper.h` so the plumbing lands before the detector.
+- **HID report MAC.** Tagging real HID reports in `MOUSE_INPUT_DATA.ExtraInformation` with a per-boot MAC and requiring the companion to verify the MAC before trusting a packet. This closes strategies 1–4 at the semantic layer — the cheat can forge the data, but not the MAC — at the cost of owning the service-callback slot ourselves at boot. HVCI-safe but feature-gated; planned as `mouse_mac.c`.
+
+### 7.14 Mouse polling-rate anomaly detector
+
+Direct port of the `MousePollingMonitor` / Vanguard-style jitter analysis into kernel, but **passive — no slot replacement, no code hooking, nothing written into mouclass**. Real USB HID silicon delivers packets with natural jitter the signal injection path cannot reproduce: a physical mouse at 1 kHz has σ(Δt) ≥ 60 µs and almost never produces a packet with Δt < 500 µs; a synthetic burst from `MouseClassServiceCallback` + trampoline or the shadow-IRP strategy delivers packets at rates that are flatly impossible on the USB bus.
+
+Detection loop:
+
+- **Discovery.** `MousePollingDiscoverDevices` walks `\Driver\MouClass`'s device chain. For each class device it sanity-checks the extension layout (`WritePointer @ +0x70`, `ReadPointer @ +0x78`, `QueueSize @ +0x88`, `DataQueueBase @ +0x68`): `QueueSize` must be in `[24 × 8, 0x10000]` and divisible by 24; read / write pointers must lie inside the queue; `DataQueueBase` must look like a non-paged kernel pointer. A device that fails sanity is skipped without ever being read from the DPC — a single BSOD from a mis-offsetted read would waste the whole detector.
+- **1 ms DPC sample.** A `KTIMER` scheduled with `KeSetTimerEx` at `Period = 1 ms` fires `MpTimerDpc` at `DISPATCH_LEVEL`. For every valid device the DPC reads `WritePointer` under `__try/__except` (device extensions are non-paged, torn reads are tolerated), computes `deltaBytes` with wrap-around across `QueueSize`, divides by `sizeof(MOUSE_INPUT_DATA) = 24` to get `deltaPackets`, and distributes the elapsed tick-delta uniformly across those packets into a 100-sample rolling window. The per-device state is guarded by its own `KSPIN_LOCK`; the DPC uses `KeAcquireSpinLockAtDpcLevel`.
+- **Heartbeat verdict.** Every 30 s `MousePollingVerify` takes each device's spinlock from PASSIVE_LEVEL, computes σ, burst rate (Δt < 500 µs), average, instantaneous Hz (packets in the trailing 1 s), and the max packets observed in a single 1 ms tick. The verdict thresholds match the C# reference project calibrated against real hardware:
+
+| Flag | Condition | Verdict contribution |
+|---|---|---|
+| `LOW_STDDEV`        | σ ≤ 15 µs                       | `INJECTION` |
+| `HIGH_BURST`        | burst rate ≥ 20.00 %            | `INJECTION` |
+| `SUPER_HIGH_HZ`     | instant Hz > 10 000             | `INJECTION` |
+| `MONSTER_BURST`     | > 20 packets in a single 1 ms tick | `INJECTION` |
+| (soft) σ ≤ 60 µs    | one soft signal                 | `SUSPICIOUS` |
+| (soft) burst rate ≥ 10 % | one soft signal            | `SUSPICIOUS` |
+
+Any `INJECTION` verdict emits `WIRE_REC_MOUSE_POLLING` + `WIRE_REC_TAMPER(AC_TAMPER_REASON_MOUSE_POLLING)` with the owning class device, total packets / bursts, instant Hz, window averages, verdict and the exact set of flags that tripped. `SUSPICIOUS` emits the record alone (no tamper). `NATURAL` and `WAITING` emit nothing — this detector is designed to stay silent on honest hardware and scream on the Macku / KMBox / 2PC-HID / cheat-driver shapes.
+
+What this closes:
+
+- Any injection path that routes packets through `MouClassServiceCallback` (direct-call, trampolined-stack, buffered-queue-write, mouhid devExt forgery, shadow-IRP completion, or a capture-and-reinject interceptor) flows through `WritePointer`; the DPC sees the writes regardless of how the callback is called, who calls it, or what the stack says. The `SynthesizeMouseInput` path bypasses mouclass and is covered by §7.13 instead.
+- No code is modified, no slot is reassigned, no interrupt is intercepted. The only observable side effect is a 1 ms periodic DPC, which costs a few hundred nanoseconds per CPU per tick — well inside the budget of a session that already runs NMI sweeps.
+
+What this does **not** cover:
+
+- Natively 8 kHz mice push ~8 packets per 1 ms tick, which collapses this detector's effective σ resolution for those devices. The `MaxPacketsPerTick` watermark + instant Hz still catch malicious bursts above ~10 kHz, but the σ-based path is best for 1–2 kHz hardware. A future mode with `KeSetHighResolutionTimer`-backed 250 µs sampling would restore full σ resolution on 8 kHz devices.
+- An injector that rate-limits itself to one packet per 1 ms and includes artificial jitter above 60 µs can defeat this detector by construction. Combined with §7.6 (callback has to land in `mouclass.sys`) and §7.12 (`mouclass.sys .text` has to hash the same), the attack surface is pushed to "legitimate-looking packets that still enter through a legitimate callback" — at which point the HID-report MAC in the §7.13 roadmap is the right answer.
+
 ---
 
 ## 8. Wire protocol
@@ -346,6 +500,9 @@ Payload types in this build:
 | `0x57` | `HANDLE_AUDIT` | `WIRE_HANDLE_AUDIT` |
 | `0x58` | `OVERLAY_DETECT` | `WIRE_OVERLAY_DETECT` |
 | `0x59` | `DMA_HIT` | `WIRE_DMA_HIT` |
+| `0x5A` | `PAGE_WALK_ANOMALY` | `WIRE_PAGE_WALK_ANOMALY` |
+| `0x5B` | `WIN32K_HOOK` | `WIRE_WIN32K_HOOK` |
+| `0x5C` | `MOUSE_POLLING` | `WIRE_MOUSE_POLLING` |
 
 Tamper reason codes carried by `WIRE_TAMPER.Reason`:
 
@@ -363,6 +520,9 @@ Tamper reason codes carried by `WIRE_TAMPER.Reason`:
 | `0x100A` | `HANDLE_STRIP`  | Dangerous access rights stripped on cross-process open |
 | `0x100B` | `OVERLAY`       | Overlay-shaped window owned by an untrusted process lineage |
 | `0x100C` | `DMA`           | PCI device matched a known DMA fingerprint, zeroed DSN, hidden PDO, or hot-plugged with bus-master |
+| `0x100D` | `W32K_SYNTHMOUSE` | `win32kbase!SynthesizeMouseInput` sample hash drifted, jmp-shaped prologue, or module shifted |
+| `0x100E` | `W32K_APC_INJECT` | reserved: APC queued to a GUI thread with a `NormalRoutine` outside a trusted kernel module |
+| `0x100F` | `MOUSE_POLLING`  | Mouclass write-pointer sampling returned σ ≤ 15 µs, burst rate ≥ 20 %, instant Hz > 10 000, or > 20 packets in one 1 ms tick |
 
 User mode drains the ring by issuing `IOCTL_AC_EVENT_POLL` with an output buffer; the driver copies as many whole records as fit and returns the byte count via `IoStatus.Information`.
 
@@ -520,6 +680,7 @@ Suggested next steps for anyone taking this further:
 - Add a VBS/HVCI gate that upgrades the HWID pipeline from "best effort" to "required" when the host is already running a Microsoft-measured launch.
 - Walk the interrupted thread's `TrapFrame` from inside the NMI callback and attribute `RIP` to a known module — current coverage reaches that execution surface through the periodic `exec_region_scan` baseline, but a per-NMI check closes the gap for very short-lived trampolines.
 - Grow the `KldrSnapshotModules` baseline incrementally on legitimate image-load notifies so that drivers loaded post-boot do not raise `UNBACKED_EXEC` for their own pool.
+- Hash individual PE sections instead of only the first executable one in `image_backing` — some rootkits land payloads in `.rdata` or `.data` sections they then flip to executable through PTE tampering, which `PAGE_WALK_ANOMALY.RWX` catches but a per-section hash would localize to the exact section.
 - Extend `input_integrity` to HIDClass filter chains (gamepads / tablet drivers) once the per-device-type extension layout is codified.
 - Add signature-based device-namespace enumeration (`\Device\{GUID}` lookups) to flag drivers that create devices named with raw GUIDs under drivers not covered by a trusted vendor whitelist.
 - Promote the overlay detector from companion-driven window reports to a direct kernel walk of `tagWND` through `PsGetProcessWin32Process`, so the detector covers windows the companion cannot see (hidden toplevel, cross-session, injected via `NtUserCreateWindowEx` from a sandboxed process).
@@ -527,4 +688,25 @@ Suggested next steps for anyone taking this further:
 ---
 
 **Core_ac** — competitive-integrity kernel driver, built to be read before it is trusted.
+
+---
+
+## 18. Diagram authoring notes
+
+Diagrams in this README are authored in [Mermaid](https://mermaid.js.org/) and render natively on github.com and any Markdown viewer that ships with the Mermaid plugin (VS Code's built-in preview, Obsidian, Notion, Quarto, mdBook via `mdbook-mermaid`, etc.). Mermaid wins over ASCII art for three reasons that matter here:
+
+1. **Diff-able text.** Each node is a single line; renaming `HookAudit` → `HookAuditPipeline` is one `sed`, not a re-paint of box art.
+2. **Semantic edges.** Dotted edges mark "writes into the SPSC ring" vs. solid edges marking "direct call" — ASCII can't carry that distinction without extra legend boxes.
+3. **Themes.** `classDef` blocks give per-node palettes (`sync` / `passive` / `hot` / `sink` / `anom`) that keep the architecture, heartbeat, and page-walker diagrams visually consistent without each caller defining its own colours.
+
+Guidelines when adding or editing a diagram:
+
+- Pick `flowchart TB` for lifecycle pipelines, `flowchart LR` for timer-tick fan-outs, `sequenceDiagram` for IOCTL conversations with the companion, `stateDiagram-v2` for the overlay / DMA flag transitions. Mermaid also carries `gantt` for long-running roadmap charts if that ever becomes useful.
+- Reuse the shared `classDef` palette (`sync`, `passive`, `hot`, `det`, `sink`, `anom`, `src`, `pw`, `ib`, `tick`, `nmi`, `ring`) — it is already understood by every diagram in this file. Add a new class only when a genuinely new role appears (e.g. `vbs` for a VBS-only subsystem).
+- Keep each diagram under ~15 nodes. Past that density Mermaid starts routing edges through other nodes and the picture loses meaning.
+- When a diagram shows a producer/consumer path, draw solid edges for synchronous control flow and dotted edges (`-.->`) for asynchronous drops into a queue (ring, SPSC, anomaly bus). This is the single convention that keeps the architecture, heartbeat and page-walker diagrams readable side-by-side.
+- GitHub strips HTML from Mermaid labels, but `<br/>` line breaks and standard Unicode (`→`, `·`, `≥`) survive — use them to keep labels compact.
+- For a physical-topology picture (PCI bus / IRP stack / win32k raw input queue), reach for `graph LR` with sub-boxed drivers rather than cramming it into a flowchart — `subgraph` blocks map 1:1 to driver names and are the clearest way to show "where in the stack is this detector?".
+
+If a diagram needs more expressive power than Mermaid gives (pixel-accurate layouts, custom shapes), the escape hatch is to commit a hand-authored SVG under `docs/diagrams/` and reference it with `![alt](docs/diagrams/foo.svg)` — SVG renders cleanly on GitHub, scales, and stays reviewable as text in PRs. PlantUML and `drawio-desktop --export` are both workable authoring sources for the SVG. Prefer that over a PNG: a rasterized screenshot can't be grep'd, can't be diffed, and goes blurry on every monitor after the first.
 "# Anti-cheat-Kernel-Driver" 

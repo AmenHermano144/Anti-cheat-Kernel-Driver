@@ -19,6 +19,8 @@
 #include "overlay_detect.h"
 #include "dma_detect.h"
 #include "image_backing.h"
+#include "win32k_guard.h"
+#include "mouse_polling.h"
 
 CORE_AC_GLOBAL g_Core;
 
@@ -124,6 +126,13 @@ static VOID CoreDeferredInit(PVOID Context)
 
     (VOID)ImageBackingInit();
     (VOID)ImageBackingBaseline();
+
+    (VOID)Win32kGuardInit();
+    (VOID)Win32kGuardBaseline();
+
+    (VOID)MousePollingInit();
+    (VOID)MousePollingDiscoverDevices();
+    (VOID)MousePollingStart();
 
     status = CoreStartWorker();
     if (!NT_SUCCESS(status)) { CORE_LOG("StartWorker failed: 0x%08X", status); goto fail; }
@@ -362,6 +371,8 @@ static VOID CorePollWorker(PVOID Context)
             (VOID)TamperRootkitVerify();
             (VOID)DmaDetectVerify();
             (VOID)ImageBackingVerify();
+            (VOID)Win32kGuardVerify();
+            (VOID)MousePollingVerify();
             (VOID)ChannelFlushPending();
         }
 
@@ -396,6 +407,8 @@ VOID CoreDriverUnload(PDRIVER_OBJECT DriverObject)
     CoreUnregisterCallbacks();
     HookAuditUnregisterCallbacks();
     AcTamperDisarm();
+    MousePollingShutdown();
+    Win32kGuardShutdown();
     ImageBackingShutdown();
     DmaDetectShutdown();
     OverlayDetectShutdown();
