@@ -78,6 +78,7 @@ A Windows x64 kernel-mode anti-cheat driver designed for competitive multiplayer
   - [17.2 Cross-field operation × version anchor](#172-cross-field-operation--version-anchor)
   - [17.3 Session key bound to the caller's PID](#173-session-key-bound-to-the-callers-pid)
   - [17.4 Combined effect](#174-combined-effect)
+  - [17.5 Hash-based kernel import resolution](#175-hash-based-kernel-import-resolution)
 - [18. Roadmap](#18-roadmap)
 - [19. Diagram authoring notes](#19-diagram-authoring-notes)
 
@@ -1169,7 +1170,7 @@ This driver was authored as a reference implementation for authorized anti-cheat
 
 ## 17. IOCTL surface hardening
 
-Three structural changes to the dispatch surface, all live in this build. None of them replace the cryptography (§10) — that already does the heavy lifting. They change how the surface is *shaped* so an attacker that has not yet broken the session cannot even enumerate what to attack.
+Four structural changes to the dispatch surface (§17.1–§17.3) plus a static-analysis layer (§17.5), all live in this build. None of them replace the cryptography (§10) — that already does the heavy lifting. They change how the surface is *shaped*, both at run time and at rest, so an attacker that has not yet broken the session cannot even enumerate what to attack.
 
 ### 17.1 Single multiplexor for every post-handshake operation
 
@@ -1254,6 +1255,52 @@ Each of the three on its own is modest. Combined, the external shape of the prot
 
 A reverser going from zero to "I can read memory through this driver" has to, in order: open the device (DACL-locked to SYSTEM + Admins — §5), find the three bootstrap codes (visible, three total), complete the ECDH handshake from the exact process whose PID they will use at dispatch, derive the key with that PID on every single mux call, pass `ValidateOpVersion` for each op by having guessed both the operation id *and* its matching version constant, and only then reach the dispatcher documented in §9. Each of those is a separate step with a separate failure mode, and the failure modes are deliberately indistinguishable from each other on the wire.
 
+### 17.5 Hash-based kernel import resolution
+
+Everything in §17.1–17.4 hides the *run-time* protocol. §17.5 hides the *static* threat model — what the driver cares about *before anyone issues a single IOCTL*. The names of the kernel APIs a driver imports are a free reconnaissance signal: `strings Core_ac.sys | grep Ps` on a vanilla build lays out the detection surface in one grep. The resolver shuts that off for the APIs that reveal intent.
+
+The targets picked are the ones that give the most information about what the driver is watching:
+
+| API | What it tells a reader |
+|-----|------------------------|
+| `PsSetCreateProcessNotifyRoutineEx` | process-creation hooks |
+| `PsSetLoadImageNotifyRoutine` / `*Ex` | module-load hooks |
+| `PsRemoveLoadImageNotifyRoutine` | ditto (and the shutdown path) |
+| `ZwQuerySystemInformation` | process/thread/module enumeration |
+| `ObReferenceObjectByName` | named-object (driver / device) lookup |
+
+At boot, before any gate runs, `AcImportsResolve(DriverObject)` locates `ntoskrnl.exe` by walking `DriverObject->DriverSection` as a `KLDR_DATA_TABLE_ENTRY` list, hashing each `BaseDllName` case-insensitively with FNV-1a 64-bit, and matching against a single precomputed constant:
+
+```c
+#define AC_HASH_NTOSKRNL  0x9BE7F70164F3DBF0ULL
+```
+
+Once the base is known, the export directory is walked: each exported name is hashed with the same FNV-1a 64 and compared to the targets. On match, the resolver writes the function pointer into a typed global (`AcZwQuerySystemInformation`, `AcObReferenceObjectByName`, etc.). All call sites in the driver reach the APIs through those globals — for the two forward-declared ones (`ZwQuerySystemInformation`, `ObReferenceObjectByName`) via `#define` aliases in `imports.h`, so not a single call site had to change.
+
+```c
+// imports.h
+#define ZwQuerySystemInformation  AcZwQuerySystemInformation
+#define ObReferenceObjectByName   AcObReferenceObjectByName
+
+// callsite is unchanged
+ZwQuerySystemInformation(CORE_SysExtendedProcessInformation, buf, cap, &got);
+```
+
+What this changes concretely:
+
+- **The `.sys` import table loses five sensitive names.** `dumpbin -imports Core_ac.sys` on the current build does not list `PsSetCreateProcessNotifyRoutineEx`, `PsSetLoadImageNotifyRoutine`, `PsRemoveLoadImageNotifyRoutine`, `PsSetLoadImageNotifyRoutineEx`, `ZwQuerySystemInformation` or `ObReferenceObjectByName`. The driver still calls them — through pointers resolved from hashes.
+- **The string table loses the same names.** `strings Core_ac.sys` on those six names returns nothing. There is no `MmGetSystemRoutineAddress(L"PsSetLoadImageNotifyRoutineEx")` fallback anymore (the previous code in `CoreRegisterCallbacks` carried that exact plaintext string, and it is gone).
+- **The name `"ntoskrnl.exe"` is never written by the resolver.** It is only stored as `AC_HASH_NTOSKRNL` (an FNV-1a 64 constant). The string does still appear in the final `.sys` — but only because the import table for the non-hashed APIs still names its parent module `ntoskrnl.exe`, which is the standard loader metadata any kernel driver carries regardless.
+- **Resolution runs once.** `AcImportsResolve` is called from `DriverEntry` before anything else; failure is a hard boot failure (`STATUS_NOT_FOUND` propagates up). There is no per-call overhead, no `MmGetSystemRoutineAddress` cache, no pointer obfuscation at rest — the pointers sit in writable globals exactly like any ordinary function pointer.
+
+What this does *not* change:
+
+- **Live debugging.** A reverser running the driver under WinDbg can trap at any call site and dump the resolved pointer. The resolver is anti-static-analysis, not anti-dynamic.
+- **Export-table heuristics.** A tool that hashes every ntoskrnl export with FNV-1a 64 and searches the `.sys` for those hashes would still find the targets. That is a one-off effort by a determined reverser; the point is to raise the cost of the drive-by `strings | grep` pass, not to defeat someone who actually sat down with the file.
+- **Other sensitive imports.** `PsSetCreateThreadNotifyRoutine`, `PsLookupProcessByProcessId`, `KeStackAttachProcess`, `IoVolumeDeviceToDosName` and similar are *not* yet behind the resolver. The scope of this pass was the six highest-signal names; widening the net is mechanical and can grow incrementally.
+
+Cost paid: one PE-export walk at boot, six comparisons per export entry, and a `imports_hash.{h,c}` translation unit of roughly 160 lines total. The runtime footprint is zero after init.
+
 ---
 
 ## 18. Roadmap
@@ -1284,6 +1331,8 @@ Suggested next steps for anyone taking this further:
 - `sus_threads` currently only reports — a natural extension is to attach to the target, read a small window around `Win32StartAddress` via the page-walker, and ship a SHA-256 of the first page of code alongside the record so the backend can YARA-match known reflective-loader stubs without a second round-trip.
 - `vhd_detect` driver list is baked (`vhdmp` / `storvsp` / `arcsas`). Replace with a companion-pushed, signature-verified list so third-party virtual-disk stacks (VeraCrypt, BestCrypt) can be added without re-signing the driver — `CHANNEL_BLOB_*` already has the plumbing.
 - `vhd_detect` could cross-wire into `game_integrity`: on a user-image load whose `FullImageName` starts with a device path that resolves to a VHD-exposed PDO, emit a paired record that names both the game module and the underlying VHD — the single highest-confidence signal that a cheat loader is live in-session.
+- Widen the §17.5 import resolver to cover the remaining sensitive names still visible in the IAT — `PsSetCreateThreadNotifyRoutine`, `PsLookupProcessByProcessId`, `KeStackAttachProcess` / `KeUnstackDetachProcess`, `IoVolumeDeviceToDosName`, `IoGetLowerDeviceObject` — same mechanism, one hash constant per name.
+- Precompute hashes at compile time via a `constexpr`-style macro (C++ TU for the resolver, or a build-step codegen) so the hash table can be audited against the names without the names landing in the final `.sys`. Current approach keeps hashes as literal `#define`s next to a commented-out list of the plaintext names — the names still have to be known to a reader with access to the source but not to one with access only to the binary.
 
 ---
 

@@ -35,3 +35,4 @@ Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\iommu_require.c;Z:\!NIMRODCO
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\tpm_attest.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\tpm_attest.obj
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\sus_threads.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\sus_threads.obj
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\vhd_detect.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\vhd_detect.obj
+Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\imports_hash.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\imports_hash.obj

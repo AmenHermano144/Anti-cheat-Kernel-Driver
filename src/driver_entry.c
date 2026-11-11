@@ -1,5 +1,6 @@
 #include "core.h"
 #include "imports.h"
+#include "imports_hash.h"
 #include "env_checks.h"
 #include "anti_tamper.h"
 #include "nmi_watchdog.h"
@@ -53,6 +54,13 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     g_Core.DriverObject = DriverObject;
 
     AcTamperInitBootCookie();
+
+    status = AcImportsResolve(DriverObject);
+    if (!NT_SUCCESS(status))
+    {
+        CORE_LOG("imports resolve failed: 0x%08X", status);
+        return status;
+    }
 
     status = EnvRunBootGates();
     if (!NT_SUCCESS(status))
@@ -262,33 +270,26 @@ static NTSTATUS CoreApplyDeviceDacl(PDEVICE_OBJECT DeviceObject)
     return status;
 }
 
-typedef NTSTATUS (NTAPI *PFN_PsSetLoadImageNotifyRoutineEx)(
-    PLOAD_IMAGE_NOTIFY_ROUTINE NotifyRoutine, ULONG_PTR Flags);
-
 static NTSTATUS CoreRegisterCallbacks(VOID)
 {
     NTSTATUS status = STATUS_UNSUCCESSFUL;
 
-    UNICODE_STRING exName;
-    RtlInitUnicodeString(&exName, L"PsSetLoadImageNotifyRoutineEx");
-    PFN_PsSetLoadImageNotifyRoutineEx pEx =
-        (PFN_PsSetLoadImageNotifyRoutineEx)MmGetSystemRoutineAddress(&exName);
-
-    if (pEx)
+    if (AcPsSetLoadImageNotifyRoutineEx)
     {
-        status = pEx(CoreImageLoadNotify, PS_IMAGE_NOTIFY_CONFLICTING_ARCHITECTURE);
+        status = AcPsSetLoadImageNotifyRoutineEx(CoreImageLoadNotify,
+                                                 PS_IMAGE_NOTIFY_CONFLICTING_ARCHITECTURE);
     }
     if (!NT_SUCCESS(status))
     {
-        status = PsSetLoadImageNotifyRoutine(CoreImageLoadNotify);
+        status = AcPsSetLoadImageNotifyRoutine(CoreImageLoadNotify);
         if (!NT_SUCCESS(status)) return status;
     }
     g_Core.LoadImageCookie = (PVOID)CoreImageLoadNotify;
 
-    status = PsSetCreateProcessNotifyRoutineEx(CoreCreateProcessNotify, FALSE);
+    status = AcPsSetCreateProcessNotifyRoutineEx(CoreCreateProcessNotify, FALSE);
     if (!NT_SUCCESS(status))
     {
-        PsRemoveLoadImageNotifyRoutine(CoreImageLoadNotify);
+        AcPsRemoveLoadImageNotifyRoutine(CoreImageLoadNotify);
         g_Core.LoadImageCookie = NULL;
         return status;
     }
@@ -300,12 +301,12 @@ static VOID CoreUnregisterCallbacks(VOID)
 {
     if (g_Core.CreateProcessCookie)
     {
-        PsSetCreateProcessNotifyRoutineEx(CoreCreateProcessNotify, TRUE);
+        AcPsSetCreateProcessNotifyRoutineEx(CoreCreateProcessNotify, TRUE);
         g_Core.CreateProcessCookie = NULL;
     }
     if (g_Core.LoadImageCookie)
     {
-        PsRemoveLoadImageNotifyRoutine(CoreImageLoadNotify);
+        AcPsRemoveLoadImageNotifyRoutine(CoreImageLoadNotify);
         g_Core.LoadImageCookie = NULL;
     }
 }

@@ -1,12 +1,10 @@
 #pragma once
 
 #include "core.h"
+#include "imports_hash.h"
 
-NTSYSAPI NTSTATUS NTAPI ZwQuerySystemInformation(
-    ULONG  SystemInformationClass,
-    PVOID  SystemInformation,
-    ULONG  SystemInformationLength,
-    PULONG ReturnLength);
+#define ZwQuerySystemInformation  AcZwQuerySystemInformation
+#define ObReferenceObjectByName   AcObReferenceObjectByName
 
 NTSYSAPI NTSTATUS NTAPI ZwQuerySecurityObject(
     HANDLE Handle,
@@ -153,16 +151,6 @@ typedef struct _CORE_SYSTEM_BIG_POOL_INFORMATION
 #ifndef PS_IMAGE_NOTIFY_CONFLICTING_ARCHITECTURE
 #define PS_IMAGE_NOTIFY_CONFLICTING_ARCHITECTURE  0x00000001
 #endif
-
-NTKERNELAPI NTSTATUS NTAPI ObReferenceObjectByName(
-    PUNICODE_STRING    ObjectName,
-    ULONG              Attributes,
-    PACCESS_STATE      AccessState,
-    ACCESS_MASK        DesiredAccess,
-    POBJECT_TYPE       ObjectType,
-    KPROCESSOR_MODE    AccessMode,
-    PVOID              ParseContext,
-    PVOID              *Object);
 
 extern POBJECT_TYPE *IoDriverObjectType;
 
