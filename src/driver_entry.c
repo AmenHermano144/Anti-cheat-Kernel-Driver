@@ -27,6 +27,8 @@
 #include "vbs_require.h"
 #include "iommu_require.h"
 #include "tpm_attest.h"
+#include "sus_threads.h"
+#include "vhd_detect.h"
 
 CORE_AC_GLOBAL g_Core;
 
@@ -158,6 +160,11 @@ static VOID CoreDeferredInit(PVOID Context)
     (VOID)TpmAttestInit();
     (VOID)TpmAttestBaseline();
     (VOID)HwidRefreshTpmBinding();
+
+    (VOID)SusThreadsInit();
+
+    (VOID)VhdDetectInit();
+    (VOID)VhdDetectSnapshot();
 
     status = CoreStartWorker();
     if (!NT_SUCCESS(status)) { CORE_LOG("StartWorker failed: 0x%08X", status); goto fail; }
@@ -404,6 +411,8 @@ static VOID CorePollWorker(PVOID Context)
             (VOID)VbsRequireVerify();
             (VOID)IommuRequireVerify();
             (VOID)TpmAttestVerify();
+            (VOID)SusThreadsVerify();
+            (VOID)VhdDetectVerify();
             (VOID)ChannelFlushPending();
         }
 
@@ -438,6 +447,8 @@ VOID CoreDriverUnload(PDRIVER_OBJECT DriverObject)
     CoreUnregisterCallbacks();
     HookAuditUnregisterCallbacks();
     AcTamperDisarm();
+    VhdDetectShutdown();
+    SusThreadsShutdown();
     TpmAttestShutdown();
     IommuRequireShutdown();
     VbsRequireShutdown();

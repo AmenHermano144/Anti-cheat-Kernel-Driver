@@ -47,7 +47,9 @@ typedef struct _CORE_AC_GLOBAL
 
     volatile LONG       SessionActive;
     GUID                SessionGuid;
-    UCHAR               SessionKey[32];
+    UCHAR               HandshakeClientPub[32];
+    UCHAR               HandshakeServerPub[32];
+    ULONG               SessionPid;
 
     PVOID               NmiCallbackHandle;
     PVOID               LoadImageCookie;

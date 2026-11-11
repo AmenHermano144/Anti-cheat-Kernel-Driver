@@ -36,3 +36,5 @@ BOOLEAN  AcTamperDrainNmiFlags(ULONG *outReason, ULONG64 *outObserved);
 #define AC_TAMPER_REASON_VBS             0x1012
 #define AC_TAMPER_REASON_IOMMU           0x1013
 #define AC_TAMPER_REASON_TPM_ATTEST      0x1014
+#define AC_TAMPER_REASON_SUS_THREAD      0x1015
+#define AC_TAMPER_REASON_VHD_MOUNT       0x1016

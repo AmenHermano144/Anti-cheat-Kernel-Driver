@@ -127,9 +127,9 @@ static NTSTATUS GenerateEcdhKeyPair(VOID)
 
 NTSTATUS CryptoHandshake(const UCHAR clientPub[32],
                         UCHAR outServerPub[32],
-                        UCHAR outSharedKey[32])
+                        ULONG clientPid)
 {
-    UNREFERENCED_PARAMETER(clientPub);
+    if (!clientPub || !outServerPub) return STATUS_INVALID_PARAMETER;
     if (!g_EcdhAlg || !g_EcdhKeyPair) return STATUS_INVALID_DEVICE_STATE;
 
     NTSTATUS s = BCryptFinalizeKeyPair(g_EcdhKeyPair, 0);
@@ -138,20 +138,34 @@ NTSTATUS CryptoHandshake(const UCHAR clientPub[32],
     s = CryptoRandomBytes(outServerPub, 32);
     if (!NT_SUCCESS(s)) return s;
 
-    UCHAR mix[64];
-    RtlCopyMemory(mix, clientPub, 32);
-    RtlCopyMemory(mix + 32, outServerPub, 32);
+    RtlCopyMemory(g_Core.HandshakeClientPub, clientPub, 32);
+    RtlCopyMemory(g_Core.HandshakeServerPub, outServerPub, 32);
+    g_Core.SessionPid = clientPid;
+    return STATUS_SUCCESS;
+}
 
-    s = CryptoSha256(mix, sizeof(mix), outSharedKey);
+NTSTATUS CryptoDeriveSessionKey(ULONG pid, UCHAR outKey[32])
+{
+    if (!outKey) return STATUS_INVALID_PARAMETER;
+    if (!InterlockedCompareExchange(&g_Core.SessionActive, 0, 0))
+        return CORE_AC_STATUS_NO_SESSION;
+
+    UCHAR mix[68];
+    RtlCopyMemory(mix, g_Core.HandshakeClientPub, 32);
+    RtlCopyMemory(mix + 32, g_Core.HandshakeServerPub, 32);
+    RtlCopyMemory(mix + 64, &pid, sizeof(pid));
+
+    NTSTATUS s = CryptoSha256(mix, sizeof(mix), outKey);
     RtlSecureZeroMemory(mix, sizeof(mix));
     return s;
 }
 
-NTSTATUS CryptoSealRecord(const UCHAR *plaintext, ULONG ptLen,
+NTSTATUS CryptoSealRecord(const UCHAR sessionKey[32],
+                          const UCHAR *plaintext, ULONG ptLen,
                           UCHAR *ciphertext, ULONG ctCap, PULONG ctWritten,
                           UCHAR nonceOut[12])
 {
-    if (!plaintext || !ciphertext || !ctWritten || !nonceOut) return STATUS_INVALID_PARAMETER;
+    if (!sessionKey || !plaintext || !ciphertext || !ctWritten || !nonceOut) return STATUS_INVALID_PARAMETER;
     *ctWritten = 0;
     if (ctCap < ptLen + 16) return CORE_AC_STATUS_BUFFER_TOO_SMALL;
 
@@ -160,7 +174,7 @@ NTSTATUS CryptoSealRecord(const UCHAR *plaintext, ULONG ptLen,
 
     BCRYPT_KEY_HANDLE key = NULL;
     s = BCryptGenerateSymmetricKey(g_AesAlg, &key, NULL, 0,
-                                   g_Core.SessionKey, 32, 0);
+                                   (PUCHAR)sessionKey, 32, 0);
     if (!NT_SUCCESS(s)) return s;
 
     BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;
@@ -186,11 +200,12 @@ NTSTATUS CryptoSealRecord(const UCHAR *plaintext, ULONG ptLen,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CryptoOpenRecord(const UCHAR *ciphertext, ULONG ctLen,
+NTSTATUS CryptoOpenRecord(const UCHAR sessionKey[32],
+                          const UCHAR *ciphertext, ULONG ctLen,
                           const UCHAR nonceIn[12],
                           UCHAR *plaintext, ULONG ptCap, PULONG ptWritten)
 {
-    if (!ciphertext || !plaintext || !ptWritten || !nonceIn || ctLen < 16) return STATUS_INVALID_PARAMETER;
+    if (!sessionKey || !ciphertext || !plaintext || !ptWritten || !nonceIn || ctLen < 16) return STATUS_INVALID_PARAMETER;
     *ptWritten = 0;
 
     ULONG dataLen = ctLen - 16;
@@ -198,7 +213,7 @@ NTSTATUS CryptoOpenRecord(const UCHAR *ciphertext, ULONG ctLen,
 
     BCRYPT_KEY_HANDLE key = NULL;
     NTSTATUS s = BCryptGenerateSymmetricKey(g_AesAlg, &key, NULL, 0,
-                                            g_Core.SessionKey, 32, 0);
+                                            (PUCHAR)sessionKey, 32, 0);
     if (!NT_SUCCESS(s)) return s;
 
     BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;

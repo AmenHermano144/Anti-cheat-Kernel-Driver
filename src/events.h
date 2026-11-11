@@ -30,3 +30,5 @@ NTSTATUS EventsReportOsVersionReport(const WIRE_OS_VERSION_REPORT *rec);
 NTSTATUS EventsReportVbsReport(const WIRE_VBS_REPORT *rec);
 NTSTATUS EventsReportIommuReport(const WIRE_IOMMU_REPORT *rec);
 NTSTATUS EventsReportTpmAttest(const WIRE_TPM_ATTEST_REPORT *rec);
+NTSTATUS EventsReportSusThread(const WIRE_SUS_THREAD *rec);
+NTSTATUS EventsReportVhdMount(const WIRE_VHD_MOUNT *rec);

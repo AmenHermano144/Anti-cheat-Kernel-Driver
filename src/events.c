@@ -230,3 +230,17 @@ NTSTATUS EventsReportTpmAttest(const WIRE_TPM_ATTEST_REPORT *rec)
     if (!rec) return STATUS_INVALID_PARAMETER;
     return ChannelEnqueueRecord(WIRE_REC_TPM_ATTEST, rec, sizeof(*rec));
 }
+
+NTSTATUS EventsReportSusThread(const WIRE_SUS_THREAD *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_SUS_THREAD, rec, sizeof(*rec));
+}
+
+NTSTATUS EventsReportVhdMount(const WIRE_VHD_MOUNT *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_VHD_MOUNT, rec, sizeof(*rec));
+}

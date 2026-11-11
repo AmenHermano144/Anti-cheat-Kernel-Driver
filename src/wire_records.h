@@ -35,6 +35,8 @@
 #define WIRE_REC_VBS_REPORT     0x60
 #define WIRE_REC_IOMMU_REPORT   0x61
 #define WIRE_REC_TPM_ATTEST     0x62
+#define WIRE_REC_SUS_THREAD     0x63
+#define WIRE_REC_VHD_MOUNT      0x64
 #define WIRE_REC_TEARDOWN       0x02
 
 #define MP_VERDICT_WAITING      0
@@ -420,6 +422,47 @@ typedef struct _WIRE_IOMMU_REPORT
     UCHAR   IvrsTablePresent;
     UCHAR   RequiredNotMet;
 } WIRE_IOMMU_REPORT, *PWIRE_IOMMU_REPORT;
+
+#define ST_FLAG_NONE              0x00000000
+#define ST_FLAG_SUSPENDED         0x00000001
+#define ST_FLAG_STUCK_SUSPENDED   0x00000002
+#define ST_FLAG_UNBACKED_START    0x00000004
+#define ST_FLAG_UNBACKED_WIN32    0x00000008
+#define ST_FLAG_FOREIGN_START     0x00000010
+#define ST_FLAG_NEW_THREAD        0x00000020
+#define ST_FLAG_SUSPICIOUS        0x00001000
+
+typedef struct _WIRE_SUS_THREAD
+{
+    ULONG64 ProcessId;
+    ULONG64 ThreadId;
+    ULONG64 StartAddress;
+    ULONG64 Win32StartAddress;
+    ULONG64 CreateTime;
+    ULONG   WaitReason;
+    ULONG   ThreadState;
+    ULONG   SuspendStreak;
+    ULONG   Flags;
+    UCHAR   ImageName[16];
+} WIRE_SUS_THREAD, *PWIRE_SUS_THREAD;
+
+#define VHD_FLAG_NONE             0x00000000
+#define VHD_FLAG_PRESENT_AT_BOOT  0x00000001
+#define VHD_FLAG_HOTPLUG_MOUNT    0x00000002
+#define VHD_FLAG_MISSING_DOSNAME  0x00000004
+#define VHD_FLAG_SUSPICIOUS       0x00001000
+
+typedef struct _WIRE_VHD_MOUNT
+{
+    ULONG64 DeviceObject;
+    ULONG64 LowerDevice;
+    ULONG   Flags;
+    ULONG   Reserved;
+    USHORT  DriverNameLen;
+    USHORT  VolumePathLen;
+    WCHAR   DriverName[64];
+    WCHAR   VolumePath[260];
+} WIRE_VHD_MOUNT, *PWIRE_VHD_MOUNT;
 
 typedef struct _WIRE_TPM_ATTEST_REPORT
 {

@@ -53,6 +53,81 @@ typedef struct _SYSTEM_MODULE_INFORMATION
 #define CORE_SysModuleInformation           0x0B
 #define CORE_SysFirmwareTableInformation    0x4C
 #define CORE_SysBigPoolInformation          0x42
+#define CORE_SysProcessInformation          0x05
+#define CORE_SysExtendedProcessInformation  0x39
+
+#define CORE_WAIT_REASON_SUSPENDED          5
+
+typedef struct _CORE_CLIENT_ID
+{
+    HANDLE UniqueProcess;
+    HANDLE UniqueThread;
+} CORE_CLIENT_ID, *PCORE_CLIENT_ID;
+
+typedef struct _CORE_SYSTEM_THREAD_INFORMATION
+{
+    LARGE_INTEGER   KernelTime;
+    LARGE_INTEGER   UserTime;
+    LARGE_INTEGER   CreateTime;
+    ULONG           WaitTime;
+    PVOID           StartAddress;
+    CORE_CLIENT_ID  ClientId;
+    KPRIORITY       Priority;
+    LONG            BasePriority;
+    ULONG           ContextSwitches;
+    ULONG           ThreadState;
+    ULONG           WaitReason;
+} CORE_SYSTEM_THREAD_INFORMATION, *PCORE_SYSTEM_THREAD_INFORMATION;
+
+typedef struct _CORE_SYSTEM_EXTENDED_THREAD_INFORMATION
+{
+    CORE_SYSTEM_THREAD_INFORMATION  ThreadInfo;
+    PVOID                           StackBase;
+    PVOID                           StackLimit;
+    PVOID                           Win32StartAddress;
+    PVOID                           TebBase;
+    ULONG_PTR                       Reserved2;
+    ULONG_PTR                       Reserved3;
+    ULONG_PTR                       Reserved4;
+} CORE_SYSTEM_EXTENDED_THREAD_INFORMATION, *PCORE_SYSTEM_EXTENDED_THREAD_INFORMATION;
+
+typedef struct _CORE_SYSTEM_PROCESS_INFORMATION
+{
+    ULONG           NextEntryOffset;
+    ULONG           NumberOfThreads;
+    LARGE_INTEGER   WorkingSetPrivateSize;
+    ULONG           HardFaultCount;
+    ULONG           NumberOfThreadsHighWatermark;
+    ULONGLONG       CycleTime;
+    LARGE_INTEGER   CreateTime;
+    LARGE_INTEGER   UserTime;
+    LARGE_INTEGER   KernelTime;
+    UNICODE_STRING  ImageName;
+    KPRIORITY       BasePriority;
+    HANDLE          UniqueProcessId;
+    HANDLE          InheritedFromUniqueProcessId;
+    ULONG           HandleCount;
+    ULONG           SessionId;
+    ULONG_PTR       UniqueProcessKey;
+    SIZE_T          PeakVirtualSize;
+    SIZE_T          VirtualSize;
+    ULONG           PageFaultCount;
+    SIZE_T          PeakWorkingSetSize;
+    SIZE_T          WorkingSetSize;
+    SIZE_T          QuotaPeakPagedPoolUsage;
+    SIZE_T          QuotaPagedPoolUsage;
+    SIZE_T          QuotaPeakNonPagedPoolUsage;
+    SIZE_T          QuotaNonPagedPoolUsage;
+    SIZE_T          PagefileUsage;
+    SIZE_T          PeakPagefileUsage;
+    SIZE_T          PrivatePageCount;
+    LARGE_INTEGER   ReadOperationCount;
+    LARGE_INTEGER   WriteOperationCount;
+    LARGE_INTEGER   OtherOperationCount;
+    LARGE_INTEGER   ReadTransferCount;
+    LARGE_INTEGER   WriteTransferCount;
+    LARGE_INTEGER   OtherTransferCount;
+} CORE_SYSTEM_PROCESS_INFORMATION, *PCORE_SYSTEM_PROCESS_INFORMATION;
 
 typedef struct _CORE_SYSTEM_BIG_POOL_ENTRY
 {

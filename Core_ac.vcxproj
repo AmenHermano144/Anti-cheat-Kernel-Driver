@@ -122,6 +122,8 @@
     <ClCompile Include="src\vbs_require.c" />
     <ClCompile Include="src\iommu_require.c" />
     <ClCompile Include="src\tpm_attest.c" />
+    <ClCompile Include="src\sus_threads.c" />
+    <ClCompile Include="src\vhd_detect.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\core.h" />
@@ -160,6 +162,8 @@
     <ClInclude Include="src\vbs_require.h" />
     <ClInclude Include="src\iommu_require.h" />
     <ClInclude Include="src\tpm_attest.h" />
+    <ClInclude Include="src\sus_threads.h" />
+    <ClInclude Include="src\vhd_detect.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

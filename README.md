@@ -6,6 +6,87 @@ A Windows x64 kernel-mode anti-cheat driver designed for competitive multiplayer
 
 ---
 
+## Table of contents
+
+<details>
+<summary><b>Overview & architecture</b> — why, what, how it boots</summary>
+
+- [1. Why Core_ac](#1-why-core_ac)
+- [2. Architecture at a glance](#2-architecture-at-a-glance)
+- [3. Module map](#3-module-map)
+- [4. Boot flow](#4-boot-flow)
+- [5. Device + DACL hardening](#5-device--dacl-hardening)
+- [6. Anti-tamper](#6-anti-tamper)
+
+</details>
+
+<details>
+<summary><b>Detection surfaces</b> — 22 detectors, what each one closes</summary>
+
+- [7. Detection surfaces](#7-detection-surfaces)
+  - [7.1 BYOVD scanner](#71-byovd-scanner)
+  - [7.2 PML4 physical walker](#72-pml4-physical-walker)
+  - [7.3 HWID collection](#73-hwid-collection)
+  - [7.4 Image + process callbacks](#74-image--process-callbacks)
+  - [7.5 Unbacked execution regions](#75-unbacked-execution-regions)
+  - [7.6 Input class callback integrity](#76-input-class-callback-integrity)
+  - [7.7 PiDDBCache / MmUnloadedDrivers mutation](#77-piddbcache--mmunloadeddrivers-mutation)
+  - [7.8 Game-process PML4 drift](#78-game-process-pml4-drift)
+  - [7.9 Protected-process hook / handle audit](#79-protected-process-hook--handle-audit)
+  - [7.10 Overlay detection (window flags + parent chain)](#710-overlay-detection-window-flags--parent-chain)
+  - [7.11 DMA-card detection (PCI config-space + PDO cross-check)](#711-dma-card-detection-pci-config-space--pdo-cross-check)
+  - [7.12 Page-walker image backing](#712-page-walker-image-backing)
+  - [7.13 win32kbase mouse-synthesis guard](#713-win32kbase-mouse-synthesis-guard)
+  - [7.14 Mouse polling-rate anomaly detector](#714-mouse-polling-rate-anomaly-detector)
+  - [7.15 Secure Boot ↔ TPM PCR attestation](#715-secure-boot--tpm-pcr-attestation)
+  - [7.16 HVCI / Core Isolation requirement](#716-hvci--core-isolation-requirement)
+  - [7.17 OS version gate (advisory)](#717-os-version-gate-advisory)
+  - [7.18 VBS requirement](#718-vbs-requirement)
+  - [7.19 IOMMU / Kernel DMA Protection requirement](#719-iommu--kernel-dma-protection-requirement)
+  - [7.20 TPM 2.0 attestation](#720-tpm-20-attestation)
+  - [7.21 Suspended / unbacked-start thread detector](#721-suspended--unbacked-start-thread-detector)
+  - [7.22 VHD / Hyper-V storage mount detector](#722-vhd--hyper-v-storage-mount-detector)
+
+</details>
+
+<details>
+<summary><b>Protocol & integration</b> — wire format, IOCTLs, crypto, companion</summary>
+
+- [8. Wire protocol](#8-wire-protocol)
+- [9. IOCTL surface](#9-ioctl-surface)
+- [10. Cryptography](#10-cryptography)
+- [13. User-mode companion contract](#13-user-mode-companion-contract)
+
+</details>
+
+<details>
+<summary><b>Build & deployment</b></summary>
+
+- [11. Build](#11-build)
+- [12. Deployment](#12-deployment)
+
+</details>
+
+<details>
+<summary><b>Reference & conventions</b></summary>
+
+- [14. Threat model and limits](#14-threat-model-and-limits)
+- [15. Code conventions](#15-code-conventions)
+- [16. License and authorization](#16-license-and-authorization)
+- [17. IOCTL surface hardening](#17-ioctl-surface-hardening)
+  - [17.1 Single multiplexor for every post-handshake operation](#171-single-multiplexor-for-every-post-handshake-operation)
+  - [17.2 Cross-field operation × version anchor](#172-cross-field-operation--version-anchor)
+  - [17.3 Session key bound to the caller's PID](#173-session-key-bound-to-the-callers-pid)
+  - [17.4 Combined effect](#174-combined-effect)
+- [18. Roadmap](#18-roadmap)
+- [19. Diagram authoring notes](#19-diagram-authoring-notes)
+
+</details>
+
+> GitHub also auto-generates a floating outline on the right side of the rendered page (hamburger icon at the top of the file view) that mirrors every heading in this document — useful on a wide screen when jumping between sections.
+
+---
+
 ## 1. Why Core_ac
 
 Modern anti-cheats are judged by three qualities:
@@ -85,6 +166,8 @@ Only `DriverEntry` runs synchronously. Device registration, callback installatio
 | `vbs_require.{c,h}` | VBS / VSM (Virtualization-Based Security — the secure kernel) requirement: `SystemIsolatedUserModeInformation` (class `165`) for the first flag byte that indicates secure kernel running + HVCI running + firmware page protection + encryption key availability, CPUID hypervisor probe for presence + vendor, `DeviceGuard\EnableVirtualizationBasedSecurity` + `RequirePlatformSecurityFeatures` + LSA `LsaCfgFlags` registry, cross-check for policy-vs-live disagreement, classify into `UNSUPPORTED` / `AVAILABLE_OFF` / `ENABLED` / `STRICT`, runtime drift on the IUM flag byte; emits `WIRE_REC_VBS_REPORT` + `TAMPER(VBS)` when the secure kernel is not running |
 | `iommu_require.{c,h}` | IOMMU / Kernel DMA Protection requirement: `SystemDmaProtectionInformation` (class `141`) for `{ DmaProtectionsAvailable, DmaProtectionsInUse }`, cross-check against `DeviceGuard\Scenarios\KernelDmaProtection\Enabled` and `DmaSecurity\AllowBootDMA`, probes ACPI firmware tables for `DMAR` (Intel VT-d) and `IVRS` (AMD-Vi) via `SystemFirmwareTableInformation`, classifies into `UNSUPPORTED` / `AVAILABLE_OFF` / `IN_USE`, runtime drift on the live state; emits `WIRE_REC_IOMMU_REPORT` + `TAMPER(IOMMU)` when Kernel DMA Protection is not in use |
 | `tpm_attest.{c,h}` | TPM 2.0 attestation: opens `\Device\TPM` (falls back to `\Device\TCM`), submits `TPM2_GetCapability(TPM_CAP_TPM_PROPERTIES)` for manufacturer + vendor-string + firmware-version-1/2 via per-property round-trips, submits `TPM2_ReadPublic(0x81010001)` to extract the RSA-2048 EK's `TPM2B_PUBLIC` + `TPM2B_NAME`, hashes the public area with SHA-256 for a stable TPM identity, accepts a 32-byte companion-pushed challenge nonce via `IOCTL_AC_PUSH_TPM_NONCE`, pulls the current PCR[0]/PCR[7]/PCR[14] digests from `secureboot_attest`'s report, and produces a composite `BundleSha256 = SHA-256(nonce || EK_name || EK_public_hash || PCR[0] || PCR[7] || PCR[14])` that the backend verifies as a (nonce-bound, replay-safe) attestation; emits `WIRE_REC_TPM_ATTEST` + `TAMPER(TPM_ATTEST)` on EK drift between boot and heartbeat |
+| `sus_threads.{c,h}` | Suspended / unbacked-start thread detector gated on protected game PIDs: enumerates `SystemExtendedProcessInformation` every heartbeat, pulls `StartAddress` + `Win32StartAddress` + `WaitReason` for each thread of each protected process, walks the owning process's PEB `InLoadOrderModuleList` through `UsermodWalkProcessModules` to collect `[base, base+size)` ranges, and flags threads whose `Win32StartAddress` (or fallback `StartAddress`) does not land in any loaded module — the terminal observable of reflective loaders, manual mappers, and thread-hijack shellcode stubs. Also maintains a 256-slot `{pid,tid,streak}` tracker that keeps count of how many consecutive heartbeats each TID stays in `KWAIT_REASON Suspended`; a thread suspended for ≥ 3 passes trips `STUCK_SUSPENDED` (the pattern of manual-mapper stubs that get spawned suspended, patched, then never resumed). Reap of stale TIDs runs per-tick so the slot table does not grow. Emits `WIRE_REC_SUS_THREAD` + `TAMPER(SUS_THREAD)` on composite `SUSPICIOUS` |
+| `vhd_detect.{c,h}` | Virtual-disk mount detector: references `\Driver\vhdmp` (Microsoft VHD miniport), `\Driver\storvsp` (Hyper-V storage VSP), `\Driver\arcsas` via `ObReferenceObjectByName` and walks each `DriverObject->DeviceObject->NextDevice` chain, snapshotting every PDO exposed at boot as baseline; each heartbeat re-walks the chains and flags any device pointer not in the baseline as `VHD_FLAG_HOTPLUG_MOUNT` — the canonical loader shape for a cheat that boots a signed loader off a VHD mounted post-game-start so artifacts leave no trace on the physical disk after unmount. Resolves the DOS name through `IoVolumeDeviceToDosName` for diagnostics (clears `VHD_FLAG_MISSING_DOSNAME` on success) and captures the lower device via `IoGetLowerDeviceObject`. Emits `WIRE_REC_VHD_MOUNT` for every mount with `VHD_FLAG_PRESENT_AT_BOOT` at baseline and `VHD_FLAG_HOTPLUG_MOUNT | SUSPICIOUS` + `TAMPER(VHD_MOUNT)` on verify |
 | `usermod.{c,h}` | User-mode module walker (PEB `InLoadOrderModuleList`) |
 | `strings.{c,h}` | Kernel-safe string primitives, FNV1a 32/64, memmem, hex formatter |
 | `core.h` | Shared types, pool tags, device names, status codes |
@@ -137,6 +220,8 @@ DriverEntry
         ├─ IommuRequireInit + Baseline         SystemDmaProtectionInformation + ACPI DMAR/IVRS + KDP reg
         ├─ TpmAttestInit + Baseline            TPM2_GetCapability + TPM2_ReadPublic(EK) + PCR fold + bundle
         ├─ HwidRefreshTpmBinding               fold TPM EK hash into HWID composite, re-emit extended
+        ├─ SusThreadsInit                      256-slot per-TID suspend-streak tracker
+        ├─ VhdDetectInit + Snapshot            \Driver\vhdmp / storvsp / arcsas PDO baseline
         └─ CoreStartWorker()                   30 s heartbeat loop
 ```
 
@@ -169,13 +254,15 @@ flowchart LR
     VBS["VbsRequireVerify<br/>IUM flag byte · hv vendor · DG reg"]:::det
     IOM["IommuRequireVerify<br/>DmaProtectionsInUse · ACPI · KDP reg"]:::det
     TPM["TpmAttestVerify<br/>EK public hash · bundle nonce+PCRs"]:::det
+    SUS["SusThreadsVerify<br/>protected-PID threads · suspend streak · unbacked start"]:::det
+    VHD["VhdDetectVerify<br/>vhdmp/storvsp/arcsas PDO hot-plug diff"]:::det
     HA["hook_audit (async)<br/>thread notify · ObReg · image load"]:::det
     MPD["mouse_polling DPC (1 ms)<br/>passive WritePointer sampling"]:::det
     FLUSH["ChannelFlushPending"]:::det
 
     RING[("SPSC wire ring")]:::ring
 
-    T --> NMI1 --> NMI2 --> HB --> PML --> KL --> EX --> IN --> TR --> DMA --> PW --> W32K --> MPV --> SB --> HV --> OSG --> VBS --> IOM --> TPM --> FLUSH
+    T --> NMI1 --> NMI2 --> HB --> PML --> KL --> EX --> IN --> TR --> DMA --> PW --> W32K --> MPV --> SB --> HV --> OSG --> VBS --> IOM --> TPM --> SUS --> VHD --> FLUSH
     MPD -.updates window-.-> MPV
     HA -.-> RING
     NMI2 -.-> RING
@@ -195,6 +282,8 @@ flowchart LR
     VBS -.vbs off / ium drift.-> RING
     IOM -.kdp off / state drift.-> RING
     TPM -.ek drift / bundle.-> RING
+    SUS -.suspicious thread.-> RING
+    VHD -.hotplug mount.-> RING
 ```
 
 ---
@@ -725,6 +814,78 @@ A real `TPM2_Quote` with an AK is the natural next step and is in the §17 roadm
 
 **Flag bits** exposed in `tpm_attest.h`: `TPM_PRESENT`, `PROPS_READABLE`, `MANUFACTURER_KNOWN`, `EK_READABLE`, `EK_NAME_EXTRACTED`, `EK_PUBLIC_HASHED`, `PCRS_PRESENT`, `NONCE_PRESENT`, `BUNDLE_READY`, `BUNDLE_DRIFTED`, `EK_DRIFTED`, `SUSPICIOUS`.
 
+### 7.21 Suspended / unbacked-start thread detector
+
+`sus_threads.c` is the kernel side of a check that the forensic scanner in `detectac src` runs post-mortem against prefetch and USN journal evidence — in the driver it runs *live*, every heartbeat, and only against protected game PIDs so the hot path on normal system traffic is a single interlocked read. The target is the terminal observable of two cheat shapes the other detectors cannot see at the thread granularity:
+
+1. **Manual-mapped stubs.** A reflective loader allocates `RWX` memory in the game process, copies a PE in by hand, and spawns a thread whose `Win32StartAddress` lands inside that allocation. The allocation never shows up in the PEB `InLoadOrderModuleList`, so the start address is *not backed by any loaded module*. `image_backing` (§7.12) catches this when the allocation goes through the kernel-side big pool; `sus_threads` catches it when the allocation lives in user-mode heap / private memory, which is the overwhelmingly common case for game-side injectors.
+2. **Thread-hijack shellcode.** A cheat `SuspendThread`s an existing game thread, patches its context (or walks a trampoline), and either leaves it suspended indefinitely or resumes it. A thread stuck in `KWAIT_REASON Suspended` across many heartbeats is not a normal shape — real suspensions are either brief (worker throttling) or come from well-known shells (dbgsrv / kdcom). Tracking the streak catches the slow-drip hijack that a single-snapshot detector would miss as noise.
+
+Collection runs through `ZwQuerySystemInformation(SystemExtendedProcessInformation = 0x39)`, which hands back `SYSTEM_PROCESS_INFORMATION` records each followed by a `SYSTEM_EXTENDED_THREAD_INFORMATION[]`. The extended thread info carries `Win32StartAddress` alongside the regular `StartAddress` — the former is what `CreateThread` / `NtCreateThreadEx` sets as the user-visible entry (and is what Process Hacker displays); the latter is what the kernel actually schedules (`ntdll!RtlUserThreadStart` for normal threads, i.e. not useful for backing checks). We prefer `Win32StartAddress` when non-zero and fall back to `StartAddress` otherwise.
+
+Per protected PID the module:
+
+- Walks `UsermodWalkProcessModules` (which `KeStackAttachProcess`es into the target and reads `PEB.Ldr.InLoadOrderModuleList`) to collect up to 128 `[base, base+size)` ranges.
+- Reads the short image name via `PsGetProcessImageFileName` for the wire record.
+- For each thread entry:
+    - If `WaitReason == 5` (`Suspended`), looks up `(pid, tid)` in a 256-slot spin-locked tracker, increments the per-slot `SuspendStreak`, and stamps `LastTick` with the current verify-pass counter. A streak of `≥ ST_STUCK_STREAK_THRESH` (3) sets `STUCK_SUSPENDED`.
+    - If `Win32StartAddress != 0` and does not fall inside any collected module range → `UNBACKED_WIN32`. If `Win32StartAddress == 0` and `StartAddress` is likewise unbacked → `UNBACKED_START`.
+- At end of pass, `ReapSlots` clears every tracker entry whose `LastTick` is not the current tick — a TID that has gone away (process exited, thread terminated, no longer suspended) is forgotten immediately, so the slot table never grows and the streak resets if a thread briefly leaves suspended and comes back.
+
+A composite `SUSPICIOUS` verdict fires when `STUCK_SUSPENDED` or any `UNBACKED_*` flag is set; a bare `SUSPENDED` without a streak or unbacked start does not emit (worker pools, dbgeng, and the win32k message pump all legitimately sit in Suspended for short windows). On a hit the module emits `WIRE_REC_SUS_THREAD` with `(pid, tid, StartAddress, Win32StartAddress, CreateTime, WaitReason, ThreadState, SuspendStreak, Flags, ImageName[16])`, routes `WIRE_REC_TAMPER(AC_TAMPER_REASON_SUS_THREAD)` with the TID as locator, and `InterlockedOr`s the flags into module-wide `g_Flag` for fast read-through by other modules.
+
+**Flag bits** exposed in `wire_records.h`:
+
+| Bit | Name | Meaning |
+|---:|---|---|
+| `0x00000001` | `SUSPENDED`         | `SYSTEM_THREAD_INFORMATION.WaitReason == Suspended (5)` this pass |
+| `0x00000002` | `STUCK_SUSPENDED`   | Same `(pid,tid)` suspended across ≥ 3 consecutive verify passes |
+| `0x00000004` | `UNBACKED_START`    | `StartAddress` does not land in any loaded module of the owning process |
+| `0x00000008` | `UNBACKED_WIN32`    | `Win32StartAddress` does not land in any loaded module of the owning process |
+| `0x00000010` | `FOREIGN_START`     | reserved: start address outside the game's primary image |
+| `0x00000020` | `NEW_THREAD`        | reserved: thread not seen in the previous pass (TID first-sighting) |
+| `0x00001000` | `SUSPICIOUS`        | composite verdict — at least one of the suspicious conditions held |
+
+**What this closes that `hook_audit` alone could not.** `hook_audit` catches cross-process thread creates (`CreateRemoteThread`) via `PsSetCreateThreadNotifyRoutine`. That fires at creation time — fine for the "parasite spawns a worker" case, blind to the "same-process injector spawns its own worker from inside the target" case (a loader DLL that already lives in-process). `sus_threads` catches the surviving thread by fingerprint of where its code lives, so a same-process spawn whose `Win32StartAddress` points into private memory still trips. Combined, the two modules cover both the cross-process and in-process spawn paths.
+
+**What this does not cover.** Threads whose `Win32StartAddress` is forged to point inside a legitimate module (e.g. a cheat that spawns the worker with an entry equal to `ntdll!RtlUserThreadStart` and then redirects RIP via a trampoline inside its own private allocation) will slip past the backing check. Pairing with §7.12's image-backing walker — which validates that the `.text` of the pointed-at module actually hashes the same — closes that window; `sus_threads` and `image_backing` together refuse to accept both "the entry points into a known module" *and* "the known module is unmodified" simultaneously.
+
+### 7.22 VHD / Hyper-V storage mount detector
+
+`vhd_detect.c` is a boot-baseline + hot-plug detector for virtual disks. The attacker shape it targets is well-known in the cheat ecosystem: a signed loader that boots off a VHD / VHDX mounted *after* the game starts, so every file artifact the loader writes (prefetch, USN journal, executed-files list, PE caches) lives on a volume that gets unmounted when the match ends. Forensic post-mortem scanners like `detectac src` never see the trace. A kernel detector that fingerprints the mount in real time is the only way to surface this.
+
+Detection is topology-level, not path-level: the module does not scan file paths looking for `\Device\VhdHardDisk...` — it goes to the owning driver stack directly. Three driver names are probed through `ObReferenceObjectByName` with `*IoDriverObjectType`:
+
+- `\Driver\vhdmp` — Microsoft's VHD miniport (VHD / VHDX / VHDS, PowerShell `Mount-VHD`, `New-VHD`, the Windows Storage Spaces plumbing).
+- `\Driver\storvsp` — Hyper-V storage VSP (containers / child-partition pass-through disks).
+- `\Driver\arcsas` — ARC-attached SAS (less common VHD-adjacent attach stack; kept for completeness).
+
+For each driver the module walks `DriverObject->DeviceObject->NextDevice` (same primitive `dma_detect` §7.11 uses for `\Driver\pci`) and treats each PDO on the chain as one mounted VHD. The walk runs twice:
+
+- **Snapshot (boot).** Every PDO pointer visible on the chain is captured in a 32-slot baseline array and emitted immediately as `WIRE_REC_VHD_MOUNT` with `VHD_FLAG_PRESENT_AT_BOOT` — informational, no tamper. A machine that legitimately runs on a VHD (containers, Windows-to-Go, Hyper-V guests) sees all of them at baseline and nothing after, which is the happy quiet state.
+- **Verify (every heartbeat).** The chain is re-walked. Any PDO pointer not in the baseline is a new mount — `VHD_FLAG_HOTPLUG_MOUNT | VHD_FLAG_SUSPICIOUS` is set, the new PDO is appended to the baseline (so it does not re-fire every heartbeat), the record is emitted, and `WIRE_REC_TAMPER(AC_TAMPER_REASON_VHD_MOUNT)` is routed with the device pointer as locator.
+
+For each emitted mount the module also resolves two diagnostics:
+
+- **DOS name** via `IoVolumeDeviceToDosName`. On VHD PDOs this often returns `STATUS_INVALID_PARAMETER` (the PDO vhdmp exposes is not itself the volume device — the real volume device sits higher in the stack, past volmgr → partmgr → volsnap). The caller tolerates that: on failure, `VolumePathLen` stays zero and `VHD_FLAG_MISSING_DOSNAME` is set. On success, the DOS name (e.g. `\DosDevices\F:`) lands in the record.
+- **Lower device** via `IoGetLowerDeviceObject` — the one immediately below the vhdmp PDO on the attached-device stack, dereferenced after capture. Useful to the backend for distinguishing a vhdmp PDO attached directly to the volmgr stack (a standalone VHD) from one attached to another virtual disk (nested / differencing).
+
+**Flag bits** exposed in `wire_records.h`:
+
+| Bit | Name | Meaning |
+|---:|---|---|
+| `0x0001` | `PRESENT_AT_BOOT`    | PDO was visible on the driver chain at snapshot time — informational |
+| `0x0002` | `HOTPLUG_MOUNT`      | PDO appeared on the chain after boot — the one the backend acts on |
+| `0x0004` | `MISSING_DOSNAME`    | `IoVolumeDeviceToDosName` did not resolve a DOS path (common on vhdmp PDOs — not fatal, informational) |
+| `0x1000` | `SUSPICIOUS`         | Composite verdict — currently equivalent to `HOTPLUG_MOUNT` |
+
+**What this closes that a file-path scan cannot.** A path-based check against the running image list is reactive — the loader has to have *already run* for the game process to have an image loaded from `\Device\VhdHardDisk<guid>\...`. The topology check sees the VHD the moment the mount IRP completes, which is before the first image under it is loaded. Combined with `image_backing` (§7.12), the backend learns both "a VHD was just mounted" (`vhd_detect`) and "a driver / module loaded off an unbacked path" (`image_backing`) as two independent records naming the same session.
+
+**What this does not cover.**
+
+- **Pre-game mount.** A VHD that is already mounted when the driver loads lands in the baseline and emits `PRESENT_AT_BOOT` without tamper. Distinguishing a legitimate always-on VHD from a cheat VHD the player mounted before launching the game is a backend policy call — the record carries the driver name + DOS name + lower device so the backend can allow-list containers / Windows-to-Go disks and treat the rest as suspicious.
+- **Non-Microsoft VHD stacks.** VeraCrypt / BestCrypt / third-party disk encryption that exposes a virtual volume under its own driver name is not in the probe list. Adding a driver is a one-line change to `g_VhdDriverNames[]`; the detection shape (`DriverObject->DeviceObject` walk) is identical.
+
 ---
 
 ## 8. Wire protocol
@@ -779,6 +940,8 @@ Payload types in this build:
 | `0x60` | `VBS_REPORT`        | `WIRE_VBS_REPORT` |
 | `0x61` | `IOMMU_REPORT`      | `WIRE_IOMMU_REPORT` |
 | `0x62` | `TPM_ATTEST`        | `WIRE_TPM_ATTEST_REPORT` |
+| `0x63` | `SUS_THREAD`        | `WIRE_SUS_THREAD` — suspicious thread in a protected game PID (suspended streak, unbacked `Win32StartAddress`) |
+| `0x64` | `VHD_MOUNT`         | `WIRE_VHD_MOUNT` — virtual-disk mount visible under `\Driver\vhdmp` / `storvsp` / `arcsas` (baseline or hot-plug) |
 
 Tamper reason codes carried by `WIRE_TAMPER.Reason`:
 
@@ -804,6 +967,8 @@ Tamper reason codes carried by `WIRE_TAMPER.Reason`:
 | `0x1012` | `VBS`            | VBS secure kernel not running, IUM flag byte drift, foreign hypervisor vendor, IUM debug enabled, or policy / live state disagreement |
 | `0x1013` | `IOMMU`          | `DmaProtectionsInUse == FALSE`, DMAR / IVRS table absent on a machine the policy claims is protected, or runtime state drift on `SystemDmaProtectionInformation` |
 | `0x1014` | `TPM_ATTEST`     | TPM absent, EK ReadPublic failed, props-only (no EK), or EK name / public hash drift between boot and heartbeat |
+| `0x1015` | `SUS_THREAD`     | Protected-PID thread whose `Win32StartAddress` / `StartAddress` is unbacked by any loaded module, or that stayed in `KWAIT_REASON Suspended` across ≥ 3 consecutive heartbeats |
+| `0x1016` | `VHD_MOUNT`      | A VHD / VHDX / Hyper-V storage PDO appeared under `\Driver\vhdmp` / `storvsp` / `arcsas` after the boot baseline |
 
 User mode drains the ring by issuing `IOCTL_AC_EVENT_POLL` with an output buffer; the driver copies as many whole records as fit and returns the byte count via `IoStatus.Information`.
 
@@ -811,43 +976,81 @@ User mode drains the ring by issuing `IOCTL_AC_EVENT_POLL` with an output buffer
 
 ## 9. IOCTL surface
 
+The driver exposes **four** `CTL_CODE` values in total. Three of them are the bootstrap handshake; the fourth is the single multiplexor through which every other operation flows, with its body sealed under AES-GCM using a session key that is re-derived from the caller's PID on every call (§17).
+
 | Code | Name | Direction | Purpose |
 |---|---|---|---|
-| `0x801` | `IOCTL_AC_PING` | — | Liveness check |
-| `0x802` | `IOCTL_AC_BOOTSTRAP` | — | Confirm channel is attached |
-| `0x803` | `IOCTL_AC_KEY_EXCHANGE` | 32 in / 32 out | ECDH-P256-based session key handshake |
-| `0x804` | `IOCTL_AC_PUSH_SESSION_UUID` | GUID in | Bind driver state to a match UUID |
-| `0x805` | `IOCTL_AC_EVENT_POLL` | out | Drain the event ring |
-| `0x806` | `IOCTL_AC_PUSH_MATCH` | blob in | Hand match metadata (stored under `CHANNEL_BLOB_MATCH`) |
-| `0x807` | `IOCTL_AC_MATCH_OVER` | — | Match teardown signal |
-| `0x808` | `IOCTL_AC_PUSH_WATCHLIST` | blob in | Dynamic BYOVD watchlist (stored under `CHANNEL_BLOB_WATCHLIST`) |
-| `0x809` | `IOCTL_AC_PUSH_PROCESS_PATH` | wide-char blob in | Register expected game executable path for PML4 watcher (stored under `CHANNEL_BLOB_PROCESS`) |
-| `0x80A` | `IOCTL_AC_PUSH_HASH` | blob in | Expected module hash (stored under `CHANNEL_BLOB_HASH`) |
-| `0x80B` | `IOCTL_AC_PUSH_VENDOR_CN` | blob in | Trusted signing CN (stored under `CHANNEL_BLOB_VENDOR`) |
-| `0x80C` | `IOCTL_AC_PUSH_USB_DEVICE` | blob in | USB device descriptor (stored under `CHANNEL_BLOB_USB`) |
-| `0x80D` | `IOCTL_AC_PUSH_U64_SET` | blob in | Opaque u64 configuration constants |
-| `0x80E` | `IOCTL_AC_DRIVER_EVENT` | blob in | Companion-origin driver event |
-| `0x80F` | `IOCTL_AC_PUSH_CMD` | blob in | Companion → driver command |
-| `0x810` | `IOCTL_AC_REPORT_WINDOW` | `OVERLAY_WINDOW_REPORT` in | Push one window's PID/HWND/style/ex-style/class/title for overlay evaluation |
-| `0x811` | `IOCTL_AC_QUERY_OVERLAY_FLAG` | 4 B out | Read the current `g_OverlayFlag` bitmap |
-| `0x812` | `IOCTL_AC_QUERY_DMA_FLAG`     | 4 B out | Read the current `g_DmaFlag` bitmap |
-| `0x813` | `IOCTL_AC_QUERY_SECUREBOOT_FLAG`   | 4 B out | Read the current `SB_FLAG_*` bitmap |
-| `0x814` | `IOCTL_AC_QUERY_SECUREBOOT_REPORT` | `SECUREBOOT_ATTEST_REPORT` out | Pull the full Secure Boot / TPM PCR report (flags, state, PCR[0]/PCR[7]/PCR[14] digests, PCR[7] baseline) |
-| `0x815` | `IOCTL_AC_QUERY_HVCI_FLAG`         | 4 B out | Read the current `HVCI_FLAG_*` bitmap |
-| `0x816` | `IOCTL_AC_QUERY_HVCI_REPORT`       | `HVCI_REQUIRE_REPORT` out | Pull the full HVCI / Core Isolation report (flags, state, `CodeIntegrityOptions`, hypervisor vendor + hash, registry + runtime bits) |
-| `0x817` | `IOCTL_AC_QUERY_OS_VERSION_FLAG`   | 4 B out | Read the current `OSG_FLAG_*` bitmap |
-| `0x818` | `IOCTL_AC_QUERY_OS_VERSION_REPORT` | `OS_VERSION_REPORT` out | Pull the full `RtlGetVersion` + UBR report (advisory, not a tamper source) |
-| `0x819` | `IOCTL_AC_QUERY_VBS_FLAG`          | 4 B out | Read the current `VBS_FLAG_*` bitmap |
-| `0x81A` | `IOCTL_AC_QUERY_VBS_REPORT`        | `VBS_REQUIRE_REPORT` out | Pull the full VBS / secure-kernel report (IUM flag byte, hypervisor vendor + hash, registry policy bits) |
-| `0x81B` | `IOCTL_AC_QUERY_IOMMU_FLAG`        | 4 B out | Read the current `IOMMU_FLAG_*` bitmap |
-| `0x81C` | `IOCTL_AC_QUERY_IOMMU_REPORT`      | `IOMMU_REQUIRE_REPORT` out | Pull the full Kernel DMA Protection report (live state, ACPI DMAR/IVRS presence, policy registry) |
-| `0x81D` | `IOCTL_AC_PUSH_TPM_NONCE`          | 32 B in | Push a fresh 32-byte challenge nonce the next TPM attestation pass will bind into its bundle |
-| `0x81E` | `IOCTL_AC_QUERY_TPM_ATTEST_FLAG`   | 4 B out | Read the current `TPM_ATTEST_FLAG_*` bitmap |
-| `0x81F` | `IOCTL_AC_QUERY_TPM_ATTEST_REPORT` | `TPM_ATTEST_REPORT` out | Pull the full TPM attestation report (manufacturer, firmware, EK name, EK public hash, nonce, PCR digests, composite bundle hash) |
+| `0x801` | `IOCTL_AC_PING` | — | Liveness check. Returns immediately. |
+| `0x802` | `IOCTL_AC_BOOTSTRAP` | — | Attach the channel; runs `ChannelBootstrap`. |
+| `0x803` | `IOCTL_AC_KEY_EXCHANGE` | 32 in / 32 out | ECDH-P256-based handshake. Captures the caller's PID into the session state. |
+| `0x850` | `IOCTL_AC_MUX`       | sealed packet in / sealed packet out | Multiplexor for every post-handshake operation. |
+
+**Mux packet layout** (`ioctl.c`):
+
+```c
+#pragma pack(push, 1)
+struct AC_MUX_INPUT_HEADER {       // 32 bytes
+    uint32_t Magic;                // 'MCAC' = 0x4341434D
+    uint32_t HeaderVersion;        // 1
+    uint32_t Operation;            // AC_OP_*
+    uint32_t OperationVersion;     // must match g_OpVersions[op].Version
+    uint8_t  Nonce[12];            // AES-GCM nonce for the ciphertext below
+    uint32_t CiphertextLen;        // sealed body length (incl. 16-byte GCM tag)
+    // uint8_t Ciphertext[CiphertextLen];
+};
+
+struct AC_MUX_OUTPUT_HEADER {      // 32 bytes
+    uint32_t Magic;                // 'CACM' = 0x4D434143
+    uint32_t HeaderVersion;        // 1
+    uint32_t Status;               // NTSTATUS from the inner op (plaintext)
+    uint32_t Reserved;
+    uint8_t  Nonce[12];            // AES-GCM nonce for the response ciphertext
+    uint32_t CiphertextLen;        // sealed response length (incl. 16-byte GCM tag)
+    // uint8_t Ciphertext[CiphertextLen];
+};
+#pragma pack(pop)
+```
+
+The driver reads `AC_MUX_INPUT_HEADER` from `AssociatedIrp.SystemBuffer`, validates `(Operation, OperationVersion)` against `g_OpVersions[]` before touching the crypto, derives the session key with `CryptoDeriveSessionKey(PsGetCurrentProcessId(), …)`, opens the ciphertext with `CryptoOpenRecord`, dispatches to the matching handler, and seals the response into the output half of the same buffer with a fresh nonce.
+
+**Operation codes** carried inside the sealed body (`enum AC_OP` in `ioctl.c`, never present in any public header):
+
+| `Operation` | Name | Body / response |
+|---:|---|---|
+| `0x9A3B1C04` | `AC_OP_PUSH_SESSION_UUID` | 16-byte `GUID` in |
+| `0xC7E52F15` | `AC_OP_EVENT_POLL` | drain of the event ring (sealed response) |
+| `0x4E1D8306` | `AC_OP_PUSH_MATCH` | match metadata blob → `CHANNEL_BLOB_MATCH` |
+| `0x2F3A9B07` | `AC_OP_MATCH_OVER` | — (fires teardown) |
+| `0x6B48D208` | `AC_OP_PUSH_WATCHLIST` | BYOVD watchlist → `CHANNEL_BLOB_WATCHLIST` |
+| `0xA1C57309` | `AC_OP_PUSH_PROCESS_PATH` | expected game exe path → `CHANNEL_BLOB_PROCESS` |
+| `0x8E9F160A` | `AC_OP_PUSH_HASH` | expected module hash → `CHANNEL_BLOB_HASH` |
+| `0xD2B4780B` | `AC_OP_PUSH_VENDOR_CN` | trusted signing CN → `CHANNEL_BLOB_VENDOR` |
+| `0x5C3A610C` | `AC_OP_PUSH_USB_DEVICE` | USB device descriptor → `CHANNEL_BLOB_USB` |
+| `0x79E8420D` | `AC_OP_PUSH_U64_SET` | opaque u64 set → `CHANNEL_BLOB_GENERIC` |
+| `0xB8D52E0E` | `AC_OP_DRIVER_EVENT` | companion-origin event → `CHANNEL_BLOB_GENERIC` |
+| `0x4F1B9A0F` | `AC_OP_PUSH_CMD` | companion → driver command → `CHANNEL_BLOB_GENERIC` |
+| `0x38CF2D10` | `AC_OP_REPORT_WINDOW` | `OVERLAY_WINDOW_REPORT` |
+| `0xE9A7B011` | `AC_OP_QUERY_OVERLAY_FLAG` | 4 B flag bitmap |
+| `0x1A5F4C12` | `AC_OP_QUERY_DMA_FLAG` | 4 B flag bitmap |
+| `0xC3E82F13` | `AC_OP_QUERY_SECUREBOOT_FLAG` | 4 B flag bitmap |
+| `0x7D4A6B14` | `AC_OP_QUERY_SECUREBOOT_REPORT` | `SECUREBOOT_ATTEST_REPORT` |
+| `0x95B1D715` | `AC_OP_QUERY_HVCI_FLAG` | 4 B flag bitmap |
+| `0x2E738A16` | `AC_OP_QUERY_HVCI_REPORT` | `HVCI_REQUIRE_REPORT` |
+| `0xF46C5917` | `AC_OP_QUERY_OS_VERSION_FLAG` | 4 B flag bitmap |
+| `0xB1E2A718` | `AC_OP_QUERY_OS_VERSION_REPORT` | `OS_VERSION_REPORT` |
+| `0x683DC419` | `AC_OP_QUERY_VBS_FLAG` | 4 B flag bitmap |
+| `0xDA51F11A` | `AC_OP_QUERY_VBS_REPORT` | `VBS_REQUIRE_REPORT` |
+| `0x27A8E31B` | `AC_OP_QUERY_IOMMU_FLAG` | 4 B flag bitmap |
+| `0xC9F56B1C` | `AC_OP_QUERY_IOMMU_REPORT` | `IOMMU_REQUIRE_REPORT` |
+| `0x4B2E981D` | `AC_OP_PUSH_TPM_NONCE` | 32 B challenge nonce |
+| `0x8F74531E` | `AC_OP_QUERY_TPM_ATTEST_FLAG` | 4 B flag bitmap |
+| `0x63A9C21F` | `AC_OP_QUERY_TPM_ATTEST_REPORT` | `TPM_ATTEST_REPORT` |
+
+Each op has its own `OperationVersion` constant (see `g_OpVersions[]`) — a request whose `(Operation, OperationVersion)` pair is not in the table is rejected before the crypto runs, so an attacker fuzzing the op space cannot even force a decrypt attempt until they have guessed the correct version for that specific op.
 
 Blob slots are keyed by `CHANNEL_BLOB_KIND`, replaced in place on a repeat push, and read back by subsystems via `ChannelGetBlob` or the suffix-match helper `ChannelBlobEqualsW`.
 
-Every IOCTL dispatch runs through `AcTamperCheckLstar()` first.
+Every IOCTL dispatch runs through `AcTamperCheckLstar()` first. The mux also re-derives the session key from `PsGetCurrentProcessId()` on every call, so a handle duplicated out of the companion process produces `STATUS_AUTH_TAG_MISMATCH` on decrypt — not a bespoke "wrong-PID" error.
 
 ---
 
@@ -964,7 +1167,96 @@ This driver was authored as a reference implementation for authorized anti-cheat
 
 ---
 
-## 17. Roadmap
+## 17. IOCTL surface hardening
+
+Three structural changes to the dispatch surface, all live in this build. None of them replace the cryptography (§10) — that already does the heavy lifting. They change how the surface is *shaped* so an attacker that has not yet broken the session cannot even enumerate what to attack.
+
+### 17.1 Single multiplexor for every post-handshake operation
+
+The driver publishes four `CTL_CODE` values in total (§9). Three of them are the bootstrap handshake; the fourth, `IOCTL_AC_MUX` (`0x850`), is the single entry point through which every other operation flows. The operation selector lives *inside the sealed body*, so static analysis sees one generic handler plus three opaque bootstrap codes.
+
+```
+read AC_MUX_INPUT_HEADER → validate (Operation, OperationVersion) →
+derive key from caller PID → AES-GCM open → DispatchOperation(Operation, body) →
+AES-GCM seal response → write AC_MUX_OUTPUT_HEADER
+```
+
+What this changes concretely:
+
+- **Every `IOCTL_AC_*` constant became an `AC_OP_*` constant** that lives only inside the sealed payload. The `.sys` string table no longer carries operation names at all — the per-op `enum AC_OP` and the `g_OpVersions[]` table live entirely inside `ioctl.c` as `static const` state.
+- **The handler's `switch` cannot be reached without a valid session.** Without `IOCTL_AC_KEY_EXCHANGE` having completed, the driver has no `HandshakeClientPub` / `HandshakeServerPub` to derive from, so `CryptoDeriveSessionKey` returns `CORE_AC_STATUS_NO_SESSION` and the body stays encrypted. An attacker cannot even replay old payloads to probe behaviour because every call that is not a key exchange must be sealed.
+- **Static analysis sees a single generic handler** with one `method = METHOD_BUFFERED`, one `access = FILE_ANY_ACCESS`, and a call to `CryptoOpenRecord` in front of everything. Mapping which physical code path is `AC_OP_EVENT_POLL` vs. which one is `AC_OP_PUSH_TPM_NONCE` becomes a dynamic exercise on a session the attacker has to first compromise.
+- **The bootstrap IOCTLs (`PING`, `BOOTSTRAP`, `KEY_EXCHANGE`) stay on their own `CTL_CODE` values** — those have to run before a session exists and so cannot be sealed. Three bootstrap codes + one post-handshake mux is the minimal visible surface the protocol can have.
+
+Cost paid: the companion loses the ability to pass plaintext input to the driver for diagnostic IOCTLs. In practice that is the right shape — anything the driver accepts in production should be authenticated by the session key regardless.
+
+### 17.2 Cross-field operation × version anchor
+
+Even with the surface collapsed to one IOCTL, the `Operation` field inside the sealed payload is a 32-bit namespace with 28 valid entries. To prevent fuzzing of that space, every operation carries its own version constant, and the driver rejects any `(Operation, OperationVersion)` pair that is not in the hard-coded allow-list. The table lives in `ioctl.c`:
+
+```c
+static const AC_OP_VERSION_ENTRY g_OpVersions[] = {
+    { AC_OP_PUSH_SESSION_UUID,       0x01350015 },
+    { AC_OP_EVENT_POLL,              0x01350042 },
+    { AC_OP_PUSH_MATCH,              0x01350089 },
+    { AC_OP_MATCH_OVER,              0x013500A7 },
+    /* … 28 entries total, every op gets its own version */
+};
+```
+
+`ValidateOpVersion(Operation, OperationVersion)` runs before `CryptoOpenRecord` is even called. A single, driver-wide `kVersion` is deliberately avoided — if every operation shared one version value, discovering the value from one operation would unlock all of them.
+
+What this closes:
+
+- **Fuzzing the operation space.** Sending `AC_OP_EVENT_POLL` with the version of `AC_OP_QUERY_SECUREBOOT_REPORT` is rejected; an attacker fuzzing operation codes without knowing the per-op version constant learns only *that something was rejected*, not *why* — and gets rejected before the crypto runs, so there is no decrypt timing signal to lean on.
+- **Replay across operations.** An old sealed payload for `AC_OP_X` cannot be replayed into the slot for `AC_OP_Y` — not because of the AES-GCM nonce (which already prevents the exact replay), but because the version field inside the sealed body belongs to a different op.
+- **Backward-compat drift.** Because the version is per-operation, bumping one op's wire format (adding a field, changing a layout) only moves that op's version constant; other ops stay on their original version. No driver-wide compat flag.
+
+Cost paid: one `u32` field in each mux header. A rounding error on the AES-GCM overhead that already exists.
+
+### 17.3 Session key bound to the caller's PID
+
+`CryptoHandshake` no longer computes a final session key. It records `HandshakeClientPub[32]` and `HandshakeServerPub[32]` in the global state along with the caller's PID (`g_Core.SessionPid`). The key is derived *on every single IOCTL dispatch*, from the PID of whoever is calling right now:
+
+```c
+NTSTATUS CryptoDeriveSessionKey(ULONG pid, UCHAR outKey[32])
+{
+    UCHAR mix[68];
+    RtlCopyMemory(mix, g_Core.HandshakeClientPub, 32);
+    RtlCopyMemory(mix + 32, g_Core.HandshakeServerPub, 32);
+    RtlCopyMemory(mix + 64, &pid, sizeof(pid));
+    NTSTATUS s = CryptoSha256(mix, sizeof(mix), outKey);
+    RtlSecureZeroMemory(mix, sizeof(mix));
+    return s;
+}
+```
+
+The mux handler calls `CryptoDeriveSessionKey(PsGetCurrentProcessId(), …)` before every `CryptoOpenRecord` / `CryptoSealRecord`. The session key is never cached — not in the global, not on the stack past the scope of a single dispatch; it is zeroed with `RtlSecureZeroMemory` on every exit path.
+
+If the handle has been duplicated out of the companion, or a different process is invoking the mux, the derived key is different from the one the companion used to seal, and `BCryptDecrypt` returns `STATUS_AUTH_TAG_MISMATCH`. The driver surfaces that status unchanged — same as any other crypto failure. An attacker cannot distinguish "wrong PID" from "wrong key" from "corrupted packet."
+
+What this closes:
+
+- **Handle hijack.** `NtDuplicateObject` from a privileged helper into a cheat loader no longer yields a usable channel. The attacker holds the handle but the key they can derive uses their own PID, and the driver uses whatever PID the IRP came in on.
+- **Shared-handle races.** A second opener that observed the handshake traffic cannot replay against the driver — its PID does not match what the companion used.
+- **Debugger / cheat-loader injection.** A userland injector that reaches into the companion process to issue its own IOCTLs can still talk to the driver (same PID), which is correct — the gate here is cross-process, not in-process. In-process injection into the companion is the separate problem `hook_audit` (§7.9) and `sus_threads` (§7.21) exist to catch.
+
+Cost paid: one SHA-256 (~200 ns on modern silicon) on every mux call, and the `HandshakeClientPub` / `HandshakeServerPub` globals in `CORE_AC_GLOBAL` replace the cached `SessionKey[32]`. The per-dispatch hash is well inside the budget of a session that already runs AES-GCM open/seal on every record.
+
+### 17.4 Combined effect
+
+Each of the three on its own is modest. Combined, the external shape of the protocol is:
+
+- **One visible IOCTL** post-handshake (`IOCTL_AC_MUX = 0x850`); everything else is encrypted body.
+- **No operation code** readable without the session — `enum AC_OP` lives only in `ioctl.c`, never in a public header, never in the symbol table.
+- **No way to enumerate operations** by fuzzing — `ValidateOpVersion` drops any (Operation, OperationVersion) pair that is not in `g_OpVersions[]` before the body parser is reached.
+- **The session key is cross-process-rebound** — derived from the caller's PID on every dispatch, never cached. A leaked handle is inert in any process other than the one that did the handshake.
+
+A reverser going from zero to "I can read memory through this driver" has to, in order: open the device (DACL-locked to SYSTEM + Admins — §5), find the three bootstrap codes (visible, three total), complete the ECDH handshake from the exact process whose PID they will use at dispatch, derive the key with that PID on every single mux call, pass `ValidateOpVersion` for each op by having guessed both the operation id *and* its matching version constant, and only then reach the dispatcher documented in §9. Each of those is a separate step with a separate failure mode, and the failure modes are deliberately indistinguishable from each other on the wire.
+
+---
+
+## 18. Roadmap
 
 Suggested next steps for anyone taking this further:
 
@@ -988,6 +1280,10 @@ Suggested next steps for anyone taking this further:
 - Fold the disk serial into HWID via `IOCTL_STORAGE_QUERY_PROPERTY(StorageDeviceProperty)` on each `\Device\HarddiskN\PartitionM` — closes the "swap NVMe to dodge the ban" path. Currently skipped because the driver-level IRP build + storage-filter stack is more involved than the registry + PCI paths already landed.
 - NIC MAC fingerprinting through `NDIS_OID_802_3_PERMANENT_ADDRESS` or an NDIS filter — the PCI VID:DID of the NIC lands in HWID but the MAC itself does not. Would need an NDIS driver layer rather than a plain WDM device.
 - `os_version_gate` currently has no `INSIDER_LEAK` heuristic — reserve the flag bit, implement by UBR / branch-name parsing from `BuildLabEx` once the backend asks for it.
+- Cross-wire `sus_threads` and `image_backing`: when `sus_threads` flags `UNBACKED_WIN32` but the start address *does* land inside a loaded module, pull that module through the page-walker and require the `.text` hash to match the backend's catalog — refuses the "entry forged into a legitimate module + RIP redirected via trampoline" shape the §7.21 note calls out.
+- `sus_threads` currently only reports — a natural extension is to attach to the target, read a small window around `Win32StartAddress` via the page-walker, and ship a SHA-256 of the first page of code alongside the record so the backend can YARA-match known reflective-loader stubs without a second round-trip.
+- `vhd_detect` driver list is baked (`vhdmp` / `storvsp` / `arcsas`). Replace with a companion-pushed, signature-verified list so third-party virtual-disk stacks (VeraCrypt, BestCrypt) can be added without re-signing the driver — `CHANNEL_BLOB_*` already has the plumbing.
+- `vhd_detect` could cross-wire into `game_integrity`: on a user-image load whose `FullImageName` starts with a device path that resolves to a VHD-exposed PDO, emit a paired record that names both the game module and the underlying VHD — the single highest-confidence signal that a cheat loader is live in-session.
 
 ---
 
@@ -995,7 +1291,7 @@ Suggested next steps for anyone taking this further:
 
 ---
 
-## 18. Diagram authoring notes
+## 19. Diagram authoring notes
 
 Diagrams in this README are authored in [Mermaid](https://mermaid.js.org/) and render natively on github.com and any Markdown viewer that ships with the Mermaid plugin (VS Code's built-in preview, Obsidian, Notion, Quarto, mdBook via `mdbook-mermaid`, etc.). Mermaid wins over ASCII art for three reasons that matter here:
 
