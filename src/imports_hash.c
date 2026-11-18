@@ -8,16 +8,58 @@ PFN_PsSetLoadImageNotifyRoutine        AcPsSetLoadImageNotifyRoutine        = NU
 PFN_PsRemoveLoadImageNotifyRoutine     AcPsRemoveLoadImageNotifyRoutine     = NULL;
 PFN_PsSetLoadImageNotifyRoutineEx      AcPsSetLoadImageNotifyRoutineEx      = NULL;
 
+PFN_PsLookupProcessByProcessId         AcPsLookupProcessByProcessId         = NULL;
+PFN_PsLookupThreadByThreadId           AcPsLookupThreadByThreadId           = NULL;
+PFN_PsGetProcessWow64Process           AcPsGetProcessWow64Process           = NULL;
+PFN_PsGetProcessImageFileName          AcPsGetProcessImageFileName          = NULL;
+PFN_PsGetProcessId                     AcPsGetProcessId                     = NULL;
+PFN_PsGetProcessPeb                    AcPsGetProcessPeb                    = NULL;
+
+PFN_ObReferenceObjectByHandle          AcObReferenceObjectByHandle          = NULL;
+PFN_MmCopyMemory                       AcMmCopyMemory                       = NULL;
+PFN_PsCreateSystemThread               AcPsCreateSystemThread               = NULL;
+
+PFN_KeRegisterNmiCallback              AcKeRegisterNmiCallback              = NULL;
+PFN_KeDeregisterNmiCallback            AcKeDeregisterNmiCallback            = NULL;
+PFN_HalSendNMI                         AcHalSendNMI                         = NULL;
+
+PFN_ZwOpenKey                          AcZwOpenKey                          = NULL;
+PFN_ZwCreateKey                        AcZwCreateKey                        = NULL;
+PFN_ZwSetValueKey                      AcZwSetValueKey                      = NULL;
+PFN_ZwQueryValueKey                    AcZwQueryValueKey                    = NULL;
+
 #define FNV64_OFFSET  0xCBF29CE484222325ULL
 #define FNV64_PRIME   0x100000001B3ULL
 
 #define AC_HASH_NTOSKRNL                            0x9BE7F70164F3DBF0ULL
+#define AC_HASH_HAL                                 0xE702A4918B863EB0ULL
+
 #define AC_HASH_ZwQuerySystemInformation            0x9B3466F6CE10AC9FULL
 #define AC_HASH_ObReferenceObjectByName             0x9F6A56D86BC44FECULL
 #define AC_HASH_PsSetCreateProcessNotifyRoutineEx   0x394102D5C46F1729ULL
 #define AC_HASH_PsSetLoadImageNotifyRoutine         0x1266348DBB3CD2C4ULL
 #define AC_HASH_PsRemoveLoadImageNotifyRoutine      0x983D615838941BDCULL
 #define AC_HASH_PsSetLoadImageNotifyRoutineEx       0xAF760C3390684271ULL
+
+#define AC_HASH_PsLookupProcessByProcessId          0x8A9495B5004B3E52ULL
+#define AC_HASH_PsLookupThreadByThreadId            0x2CB28D18FD28BA7AULL
+#define AC_HASH_PsGetProcessWow64Process            0xCA8DC58B141E3783ULL
+#define AC_HASH_PsGetProcessImageFileName           0xF9CF74A391B379CFULL
+#define AC_HASH_PsGetProcessId                      0xE3F7E2E94AD84598ULL
+#define AC_HASH_PsGetProcessPeb                     0x0F05656AA822964CULL
+
+#define AC_HASH_ObReferenceObjectByHandle           0x905061B4022A3E81ULL
+#define AC_HASH_MmCopyMemory                        0x306328EE8E049A39ULL
+#define AC_HASH_PsCreateSystemThread                0x139DB613C0BCE905ULL
+
+#define AC_HASH_KeRegisterNmiCallback               0xAA520FE89918F267ULL
+#define AC_HASH_KeDeregisterNmiCallback             0x6DF139B1E3A8A0C6ULL
+#define AC_HASH_HalSendNMI                          0x73CF418D0F5F810CULL
+
+#define AC_HASH_ZwOpenKey                           0x68728064A1D2D535ULL
+#define AC_HASH_ZwCreateKey                         0x8DAF12FB2E3254A1ULL
+#define AC_HASH_ZwSetValueKey                       0x98F5C40CC4762FEEULL
+#define AC_HASH_ZwQueryValueKey                     0xE8151E4A9CFECBA2ULL
 
 typedef struct _CORE_KLDR_ENTRY
 {
@@ -58,7 +100,7 @@ static ULONG64 FnvUnicodeI(const WCHAR *s, USHORT lenBytes)
     return h;
 }
 
-static PVOID FindNtoskrnlBase(PDRIVER_OBJECT drv)
+static PVOID FindModuleBase(PDRIVER_OBJECT drv, ULONG64 nameHash)
 {
     if (!drv || !drv->DriverSection) return NULL;
 
@@ -74,7 +116,7 @@ static PVOID FindNtoskrnlBase(PDRIVER_OBJECT drv)
             if (e->BaseDllName.Buffer && e->BaseDllName.Length > 0 && e->DllBase)
             {
                 ULONG64 h = FnvUnicodeI(e->BaseDllName.Buffer, e->BaseDllName.Length);
-                if (h == AC_HASH_NTOSKRNL) return e->DllBase;
+                if (h == nameHash) return e->DllBase;
             }
             cursor = cursor->Flink;
         }
@@ -133,7 +175,8 @@ static PVOID FindExport(PVOID imgBase, ULONG64 nameHash)
 
 NTSTATUS AcImportsResolve(PDRIVER_OBJECT DriverObject)
 {
-    PVOID ntBase = FindNtoskrnlBase(DriverObject);
+    PVOID ntBase  = FindModuleBase(DriverObject, AC_HASH_NTOSKRNL);
+    PVOID halBase = FindModuleBase(DriverObject, AC_HASH_HAL);
     if (!ntBase) return STATUS_NOT_FOUND;
 
     AcZwQuerySystemInformation =
@@ -148,6 +191,41 @@ NTSTATUS AcImportsResolve(PDRIVER_OBJECT DriverObject)
         (PFN_PsRemoveLoadImageNotifyRoutine)FindExport(ntBase, AC_HASH_PsRemoveLoadImageNotifyRoutine);
     AcPsSetLoadImageNotifyRoutineEx =
         (PFN_PsSetLoadImageNotifyRoutineEx)FindExport(ntBase, AC_HASH_PsSetLoadImageNotifyRoutineEx);
+
+    AcPsLookupProcessByProcessId =
+        (PFN_PsLookupProcessByProcessId)FindExport(ntBase, AC_HASH_PsLookupProcessByProcessId);
+    AcPsLookupThreadByThreadId =
+        (PFN_PsLookupThreadByThreadId)FindExport(ntBase, AC_HASH_PsLookupThreadByThreadId);
+    AcPsGetProcessWow64Process =
+        (PFN_PsGetProcessWow64Process)FindExport(ntBase, AC_HASH_PsGetProcessWow64Process);
+    AcPsGetProcessImageFileName =
+        (PFN_PsGetProcessImageFileName)FindExport(ntBase, AC_HASH_PsGetProcessImageFileName);
+    AcPsGetProcessId =
+        (PFN_PsGetProcessId)FindExport(ntBase, AC_HASH_PsGetProcessId);
+    AcPsGetProcessPeb =
+        (PFN_PsGetProcessPeb)FindExport(ntBase, AC_HASH_PsGetProcessPeb);
+
+    AcObReferenceObjectByHandle =
+        (PFN_ObReferenceObjectByHandle)FindExport(ntBase, AC_HASH_ObReferenceObjectByHandle);
+    AcMmCopyMemory =
+        (PFN_MmCopyMemory)FindExport(ntBase, AC_HASH_MmCopyMemory);
+    AcPsCreateSystemThread =
+        (PFN_PsCreateSystemThread)FindExport(ntBase, AC_HASH_PsCreateSystemThread);
+
+    AcKeRegisterNmiCallback =
+        (PFN_KeRegisterNmiCallback)FindExport(ntBase, AC_HASH_KeRegisterNmiCallback);
+    AcKeDeregisterNmiCallback =
+        (PFN_KeDeregisterNmiCallback)FindExport(ntBase, AC_HASH_KeDeregisterNmiCallback);
+
+    if (halBase)
+        AcHalSendNMI = (PFN_HalSendNMI)FindExport(halBase, AC_HASH_HalSendNMI);
+    if (!AcHalSendNMI)
+        AcHalSendNMI = (PFN_HalSendNMI)FindExport(ntBase, AC_HASH_HalSendNMI);
+
+    AcZwOpenKey       = (PFN_ZwOpenKey)      FindExport(ntBase, AC_HASH_ZwOpenKey);
+    AcZwCreateKey     = (PFN_ZwCreateKey)    FindExport(ntBase, AC_HASH_ZwCreateKey);
+    AcZwSetValueKey   = (PFN_ZwSetValueKey)  FindExport(ntBase, AC_HASH_ZwSetValueKey);
+    AcZwQueryValueKey = (PFN_ZwQueryValueKey)FindExport(ntBase, AC_HASH_ZwQueryValueKey);
 
     if (!AcZwQuerySystemInformation)          return STATUS_NOT_FOUND;
     if (!AcObReferenceObjectByName)           return STATUS_NOT_FOUND;

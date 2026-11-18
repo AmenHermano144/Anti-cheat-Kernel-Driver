@@ -5,6 +5,7 @@
 #include "channels.h"
 #include "wire_records.h"
 #include "tpm_attest.h"
+#include "hwid_history.h"
 
 static HWID_SNAPSHOT g_Hwid;
 static volatile LONG g_Captured = 0;
@@ -158,11 +159,23 @@ static VOID HwidEnumeratePci(PHWID_EXTENDED_FINGERPRINT ext)
 
 static BOOLEAN HwidReadEdidForDevice(HANDLE deviceKey, PHWID_MONITOR_FINGERPRINT mon)
 {
+    static const UCHAR eParams[] =
+        { 0x44^0x5A, 0x65^0x5A, 0x76^0x5A, 0x69^0x5A, 0x63^0x5A, 0x65^0x5A,
+          0x20^0x5A, 0x50^0x5A, 0x61^0x5A, 0x72^0x5A, 0x61^0x5A, 0x6D^0x5A,
+          0x65^0x5A, 0x74^0x5A, 0x65^0x5A, 0x72^0x5A, 0x73^0x5A };
+    static const UCHAR eEdid[] =
+        { 0x45^0x5A, 0x44^0x5A, 0x49^0x5A, 0x44^0x5A };
+
+    WCHAR nameParams[sizeof(eParams) + 1];
+    WCHAR nameEdid[sizeof(eEdid) + 1];
+    CoreStrDecodeW(eParams, sizeof(eParams), 0x5A, nameParams, ARRAYSIZE(nameParams));
+    CoreStrDecodeW(eEdid,   sizeof(eEdid),   0x5A, nameEdid,   ARRAYSIZE(nameEdid));
+
     UNICODE_STRING sub;
     OBJECT_ATTRIBUTES oa;
     HANDLE paramKey = NULL;
 
-    RtlInitUnicodeString(&sub, L"Device Parameters");
+    RtlInitUnicodeString(&sub, nameParams);
     InitializeObjectAttributes(&oa, &sub,
                                OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
                                deviceKey, NULL);
@@ -171,7 +184,7 @@ static BOOLEAN HwidReadEdidForDevice(HANDLE deviceKey, PHWID_MONITOR_FINGERPRINT
     if (!NT_SUCCESS(s)) return FALSE;
 
     UNICODE_STRING edidValue;
-    RtlInitUnicodeString(&edidValue, L"EDID");
+    RtlInitUnicodeString(&edidValue, nameEdid);
 
     UCHAR buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + HWID_EDID_BYTES];
     ULONG resultLength = 0;
@@ -348,6 +361,12 @@ NTSTATUS HwidCollectBoot(VOID)
 
     (VOID)ChannelEnqueueRecord(WIRE_REC_HWID_HELLO, &hello, sizeof(hello));
     (VOID)ChannelEnqueueRecord(WIRE_REC_HWID_EXTENDED, &g_Hwid.Extended, sizeof(g_Hwid.Extended));
+
+    WIRE_HWID_HISTORY hist;
+    if (NT_SUCCESS(HwidHistoryEvaluate(&g_Hwid.Smbios, &hist)))
+    {
+        (VOID)ChannelEnqueueRecord(WIRE_REC_HWID_HISTORY, &hist, sizeof(hist));
+    }
 
     (VOID)HwidEnumerateAcpi();
     return STATUS_SUCCESS;

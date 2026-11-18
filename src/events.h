@@ -7,6 +7,11 @@ NTSTATUS EventsInit(VOID);
 VOID     EventsShutdown(VOID);
 
 NTSTATUS EventsEmitHeartbeat(VOID);
+NTSTATUS EventsEmitAllModuleHeartbeats(VOID);
+NTSTATUS EventsEmitModuleHeartbeat(ULONG HandlerId, ULONG Phase, ULONG Flags);
+
+NTSTATUS EventsEmitTrustSignal(ULONG HandlerId, ULONG Kind, ULONG Severity,
+                               ULONG Confidence, ULONG64 NumericValue, ULONG64 ContextPtr);
 NTSTATUS EventsReportProcessAttach(HANDLE ProcessId, PPS_CREATE_NOTIFY_INFO CreateInfo);
 NTSTATUS EventsReportProcessExit(HANDLE ProcessId);
 NTSTATUS EventsReportTamper(ULONG reasonCode, PVOID extra);

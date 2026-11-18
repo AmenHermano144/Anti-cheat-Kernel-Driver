@@ -122,7 +122,7 @@ NTSTATUS ChannelDrainEvents(PVOID outBuffer, ULONG outCap, PULONG written)
         if (need > space) break;
 
         WIRE_RECORD_HEADER *hdr = (WIRE_RECORD_HEADER *)out;
-        hdr->Magic = WIRE_RECORD_MAGIC;
+        hdr->Magic = WIRE_MAGIC_FOR(slot->Type);
         hdr->Version = WIRE_RECORD_VERSION;
         hdr->Type = slot->Type;
         hdr->Flags = 0;

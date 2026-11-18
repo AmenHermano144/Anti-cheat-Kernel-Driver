@@ -165,3 +165,27 @@ VOID CoreLowercaseW(WCHAR *s)
     if (!s) return;
     while (*s) { *s = LowerW(*s); s++; }
 }
+
+VOID CoreStrDecodeW(const UCHAR *enc, SIZE_T len, UCHAR key, WCHAR *outBuf, SIZE_T outCap)
+{
+    if (!outBuf || outCap == 0) return;
+    SIZE_T i = 0;
+    while (i < len && i + 1 < outCap)
+    {
+        outBuf[i] = (WCHAR)((UCHAR)(enc[i] ^ key));
+        i++;
+    }
+    outBuf[i] = 0;
+}
+
+VOID CoreStrDecodeA(const UCHAR *enc, SIZE_T len, UCHAR key, CHAR *outBuf, SIZE_T outCap)
+{
+    if (!outBuf || outCap == 0) return;
+    SIZE_T i = 0;
+    while (i < len && i + 1 < outCap)
+    {
+        outBuf[i] = (CHAR)((UCHAR)(enc[i] ^ key));
+        i++;
+    }
+    outBuf[i] = 0;
+}

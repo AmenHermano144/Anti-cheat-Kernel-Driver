@@ -22,3 +22,6 @@ VOID    CoreHexFormat(const UCHAR *bytes, SIZE_T len, CHAR *outHex, SIZE_T hexCa
 
 VOID    CoreLowercaseA(CHAR *s);
 VOID    CoreLowercaseW(WCHAR *s);
+
+VOID    CoreStrDecodeW(const UCHAR *enc, SIZE_T len, UCHAR key, WCHAR *outBuf, SIZE_T outCap);
+VOID    CoreStrDecodeA(const UCHAR *enc, SIZE_T len, UCHAR key, CHAR  *outBuf, SIZE_T outCap);

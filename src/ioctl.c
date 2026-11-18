@@ -13,6 +13,7 @@
 #include "vbs_require.h"
 #include "iommu_require.h"
 #include "tpm_attest.h"
+#include "handler_gate.h"
 
 typedef enum _AC_OP
 {
@@ -44,6 +45,8 @@ typedef enum _AC_OP
     AC_OP_PUSH_TPM_NONCE          = 0x4B2E981D,
     AC_OP_QUERY_TPM_ATTEST_FLAG   = 0x8F74531E,
     AC_OP_QUERY_TPM_ATTEST_REPORT = 0x63A9C21F,
+    AC_OP_PUSH_HANDLER_FLAGS      = 0x5E83D920,
+    AC_OP_QUERY_HANDLER_EPOCH     = 0x3A91B521,
 } AC_OP;
 
 typedef struct _AC_OP_VERSION_ENTRY
@@ -82,6 +85,8 @@ static const AC_OP_VERSION_ENTRY g_OpVersions[] =
     { AC_OP_PUSH_TPM_NONCE,          0x0135023B },
     { AC_OP_QUERY_TPM_ATTEST_FLAG,   0x0135024D },
     { AC_OP_QUERY_TPM_ATTEST_REPORT, 0x01350262 },
+    { AC_OP_PUSH_HANDLER_FLAGS,      0x01350278 },
+    { AC_OP_QUERY_HANDLER_EPOCH,     0x01350289 },
 };
 
 #define AC_MUX_INPUT_MAGIC    0x4341434Du
@@ -328,6 +333,19 @@ static NTSTATUS DispatchOperation(ULONG op,
         if (!NT_SUCCESS(s)) return s;
         RtlCopyMemory(resp, &rep, sizeof(rep));
         *respLen = sizeof(rep);
+        return STATUS_SUCCESS;
+    }
+
+    case AC_OP_PUSH_HANDLER_FLAGS:
+        if (!body || bodyLen < sizeof(AC_GATE_PUSH)) return STATUS_INVALID_PARAMETER;
+        return HandlerGateApply(body, bodyLen);
+
+    case AC_OP_QUERY_HANDLER_EPOCH:
+    {
+        if (respCap < sizeof(ULONG)) return CORE_AC_STATUS_BUFFER_TOO_SMALL;
+        ULONG e = HandlerGateEpoch();
+        RtlCopyMemory(resp, &e, sizeof(e));
+        *respLen = sizeof(e);
         return STATUS_SUCCESS;
     }
 

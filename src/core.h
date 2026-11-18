@@ -54,6 +54,9 @@ typedef struct _CORE_AC_GLOBAL
     PVOID               NmiCallbackHandle;
     PVOID               LoadImageCookie;
     PVOID               CreateProcessCookie;
+
+    PVOID               SwitcherStackBase;
+    PVOID               SwitcherStackTop;
 } CORE_AC_GLOBAL, *PCORE_AC_GLOBAL;
 
 extern CORE_AC_GLOBAL g_Core;

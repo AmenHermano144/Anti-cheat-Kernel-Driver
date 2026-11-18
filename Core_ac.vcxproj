@@ -69,7 +69,7 @@
       <DisableSpecificWarnings>4152;4201;4214;4221;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>ntoskrnl.lib;hal.lib;ksecdd.lib;cng.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ntoskrnl.lib;hal.lib;ksecdd.lib;cng.lib;fltMgr.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <EntryPointSymbol>DriverEntry</EntryPointSymbol>
     </Link>
   </ItemDefinitionGroup>
@@ -82,7 +82,7 @@
       <DisableSpecificWarnings>4152;4201;4214;4221;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>ntoskrnl.lib;hal.lib;ksecdd.lib;cng.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ntoskrnl.lib;hal.lib;ksecdd.lib;cng.lib;fltMgr.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <EntryPointSymbol>DriverEntry</EntryPointSymbol>
     </Link>
   </ItemDefinitionGroup>
@@ -125,6 +125,13 @@
     <ClCompile Include="src\sus_threads.c" />
     <ClCompile Include="src\vhd_detect.c" />
     <ClCompile Include="src\imports_hash.c" />
+    <ClCompile Include="src\handler_gate.c" />
+    <ClCompile Include="src\ac_anchor.c" />
+    <ClCompile Include="src\hv_probe.c" />
+    <ClCompile Include="src\hwid_history.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <MASM Include="src\ac_asm.asm" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\core.h" />
@@ -166,6 +173,10 @@
     <ClInclude Include="src\sus_threads.h" />
     <ClInclude Include="src\vhd_detect.h" />
     <ClInclude Include="src\imports_hash.h" />
+    <ClInclude Include="src\handler_gate.h" />
+    <ClInclude Include="src\ac_asm.h" />
+    <ClInclude Include="src\hv_probe.h" />
+    <ClInclude Include="src\hwid_history.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

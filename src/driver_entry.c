@@ -30,6 +30,9 @@
 #include "tpm_attest.h"
 #include "sus_threads.h"
 #include "vhd_detect.h"
+#include "handler_gate.h"
+#include "ac_asm.h"
+#include "hv_probe.h"
 
 CORE_AC_GLOBAL g_Core;
 
@@ -108,6 +111,17 @@ static VOID CoreDeferredInit(PVOID Context)
     status = EventsInit();
     if (!NT_SUCCESS(status)) { CORE_LOG("EventsInit failed: 0x%08X", status); goto fail; }
 
+    status = HandlerGateInit();
+    if (!NT_SUCCESS(status)) { CORE_LOG("HandlerGateInit failed: 0x%08X", status); goto fail; }
+
+    g_Core.SwitcherStackBase = CoreAlloc(AC_SWITCHER_STACK_BYTES, CORE_AC_POOL_TAG);
+    if (g_Core.SwitcherStackBase)
+    {
+        UCHAR *top = (UCHAR *)g_Core.SwitcherStackBase + AC_SWITCHER_STACK_BYTES;
+        top = (UCHAR *)((ULONG_PTR)top & ~(ULONG_PTR)0xF);
+        g_Core.SwitcherStackTop = top;
+    }
+
     status = AcTamperArm();
     if (!NT_SUCCESS(status)) { CORE_LOG("TamperArm failed: 0x%08X", status); goto fail; }
 
@@ -173,6 +187,8 @@ static VOID CoreDeferredInit(PVOID Context)
 
     (VOID)VhdDetectInit();
     (VOID)VhdDetectSnapshot();
+
+    (VOID)HvProbeInit();
 
     status = CoreStartWorker();
     if (!NT_SUCCESS(status)) { CORE_LOG("StartWorker failed: 0x%08X", status); goto fail; }
@@ -317,14 +333,14 @@ static VOID CoreImageLoadNotify(PUNICODE_STRING FullImageName, HANDLE ProcessId,
 
     if (ImageInfo->SystemModeImage)
     {
-        (VOID)ByovdScannerOnImageLoad(FullImageName, ImageInfo);
-        (VOID)KldrOnKernelImageLoad(FullImageName, ImageInfo);
-        (VOID)ImageBackingOnKernelImageLoad(FullImageName, ImageInfo);
+        if (HandlerGateAllowed(AC_H_BYOVD))     (VOID)ByovdScannerOnImageLoad(FullImageName, ImageInfo);
+        if (HandlerGateAllowed(AC_H_KLDR))      (VOID)KldrOnKernelImageLoad(FullImageName, ImageInfo);
+        if (HandlerGateAllowed(AC_H_IMAGEBACK)) (VOID)ImageBackingOnKernelImageLoad(FullImageName, ImageInfo);
     }
     else
     {
-        (VOID)GameIntegrityOnUserImageLoad(ProcessId, FullImageName, ImageInfo);
-        (VOID)HookAuditOnUserImageLoad(ProcessId, FullImageName, ImageInfo);
+        if (HandlerGateAllowed(AC_H_GAMEINT))   (VOID)GameIntegrityOnUserImageLoad(ProcessId, FullImageName, ImageInfo);
+        if (HandlerGateAllowed(AC_H_HOOKAUDIT)) (VOID)HookAuditOnUserImageLoad(ProcessId, FullImageName, ImageInfo);
     }
 }
 
@@ -388,32 +404,41 @@ static VOID CorePollWorker(PVOID Context)
         }
         else
         {
-            NmiWatchdogRequestCrossCpuSweep();
-
-            ULONG nmiReason = 0;
-            ULONG64 nmiObserved = 0;
-            if (AcTamperDrainNmiFlags(&nmiReason, &nmiObserved))
+            if (HandlerGateAllowed(AC_H_TAMPER))
             {
-                (VOID)AcTamperOnViolation(nmiReason, (PVOID)nmiObserved);
+                NmiWatchdogRequestCrossCpuSweep();
+
+                ULONG nmiReason = 0;
+                ULONG64 nmiObserved = 0;
+                if (AcTamperDrainNmiFlags(&nmiReason, &nmiObserved))
+                {
+                    (VOID)AcTamperOnViolation(nmiReason, (PVOID)nmiObserved);
+                }
             }
-            (VOID)EventsEmitHeartbeat();
-            (VOID)Pml4Rescan();
-            (VOID)KldrDiffScan();
-            (VOID)ExecRegionScanDiff();
-            (VOID)InputIntegrityVerify();
-            (VOID)TamperRootkitVerify();
-            (VOID)DmaDetectVerify();
-            (VOID)ImageBackingVerify();
-            (VOID)Win32kGuardVerify();
-            (VOID)MousePollingVerify();
-            (VOID)SecureBootAttestVerify();
-            (VOID)HvciRequireVerify();
-            (VOID)OsVersionGateVerify();
-            (VOID)VbsRequireVerify();
-            (VOID)IommuRequireVerify();
-            (VOID)TpmAttestVerify();
-            (VOID)SusThreadsVerify();
-            (VOID)VhdDetectVerify();
+
+            if (HandlerGateAllowed(AC_H_HEARTBEAT))
+            {
+                (VOID)EventsEmitHeartbeat();
+                (VOID)EventsEmitAllModuleHeartbeats();
+            }
+            if (HandlerGateAllowed(AC_H_PML4))       (VOID)Pml4Rescan();
+            if (HandlerGateAllowed(AC_H_KLDR))       (VOID)KldrDiffScan();
+            if (HandlerGateAllowed(AC_H_EXECREGION)) (VOID)ExecRegionScanDiff();
+            if (HandlerGateAllowed(AC_H_INPUTINTG))  (VOID)InputIntegrityVerify();
+            if (HandlerGateAllowed(AC_H_ROOTKIT))    (VOID)TamperRootkitVerify();
+            if (HandlerGateAllowed(AC_H_DMA))        (VOID)DmaDetectVerify();
+            if (HandlerGateAllowed(AC_H_IMAGEBACK))  (VOID)ImageBackingVerify();
+            if (HandlerGateAllowed(AC_H_WIN32K))     (VOID)Win32kGuardVerify();
+            if (HandlerGateAllowed(AC_H_MOUSEPOLL))  (VOID)MousePollingVerify();
+            if (HandlerGateAllowed(AC_H_SECUREBOOT)) (VOID)SecureBootAttestVerify();
+            if (HandlerGateAllowed(AC_H_HVCI))       (VOID)HvciRequireVerify();
+            if (HandlerGateAllowed(AC_H_OSVERSION))  (VOID)OsVersionGateVerify();
+            if (HandlerGateAllowed(AC_H_VBS))        (VOID)VbsRequireVerify();
+            if (HandlerGateAllowed(AC_H_IOMMU))      (VOID)IommuRequireVerify();
+            if (HandlerGateAllowed(AC_H_TPM))        (VOID)TpmAttestVerify();
+            if (HandlerGateAllowed(AC_H_SUSTHREADS)) (VOID)SusThreadsVerify();
+            if (HandlerGateAllowed(AC_H_VHD))        (VOID)VhdDetectVerify();
+            if (HandlerGateAllowed(AC_H_ENV))        (VOID)HvProbeVerify();
             (VOID)ChannelFlushPending();
         }
 
@@ -467,9 +492,18 @@ VOID CoreDriverUnload(PDRIVER_OBJECT DriverObject)
     ExecRegionScanShutdown();
     GameIntegrityShutdown();
     Pml4ClearWatched();
+    HvProbeShutdown();
+    HandlerGateShutdown();
     ChannelShutdown();
     EventsShutdown();
     CryptoShutdown();
+
+    if (g_Core.SwitcherStackBase)
+    {
+        CoreFree(g_Core.SwitcherStackBase, CORE_AC_POOL_TAG);
+        g_Core.SwitcherStackBase = NULL;
+        g_Core.SwitcherStackTop = NULL;
+    }
 
     if (g_Core.SymLink.Buffer)
     {

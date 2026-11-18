@@ -1,6 +1,8 @@
 #include "events.h"
 #include "channels.h"
 #include "wire_records.h"
+#include "handler_gate.h"
+#include "ac_asm.h"
 
 static volatile LONG g_EventsReady = 0;
 
@@ -24,6 +26,63 @@ NTSTATUS EventsEmitHeartbeat(VOID)
     hb.InitState = (ULONG)InterlockedCompareExchange(&g_Core.InitState, 0, 0);
     hb.Reserved = 0;
     return ChannelEnqueueRecord(WIRE_REC_HEARTBEAT, &hb, sizeof(hb));
+}
+
+NTSTATUS EventsEmitModuleHeartbeat(ULONG HandlerId, ULONG Phase, ULONG Flags)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+
+    WIRE_MODULE_HEARTBEAT hb;
+    hb.HandlerId  = HandlerId;
+    hb.Phase      = Phase;
+    hb.TscTick    = AcRdtscSerialized();
+    hb.GateEpoch  = HandlerGateEpoch();
+    hb.Flags      = Flags;
+    hb.BootCookie = CoreBootCookie();
+    return ChannelEnqueueRecord(WIRE_REC_MODULE_HB, &hb, sizeof(hb));
+}
+
+NTSTATUS EventsEmitTrustSignal(ULONG HandlerId, ULONG Kind, ULONG Severity,
+                               ULONG Confidence, ULONG64 NumericValue, ULONG64 ContextPtr)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+
+    WIRE_TRUST_SIGNAL sig;
+    sig.HandlerId    = HandlerId;
+    sig.Kind         = Kind;
+    sig.Severity     = Severity;
+    sig.Confidence   = Confidence;
+    sig.NumericValue = NumericValue;
+    sig.ContextPtr   = ContextPtr;
+    sig.BootCookie   = CoreBootCookie();
+    sig.GateEpoch    = HandlerGateEpoch();
+    sig.Reserved     = 0;
+    return ChannelEnqueueRecord(WIRE_REC_TRUST_SIGNAL, &sig, sizeof(sig));
+}
+
+NTSTATUS EventsEmitAllModuleHeartbeats(VOID)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+
+    static const AC_HANDLER_ID kTracked[] =
+    {
+        AC_H_HWID, AC_H_DMA, AC_H_PML4, AC_H_KLDR, AC_H_BYOVD,
+        AC_H_EXECREGION, AC_H_INPUTINTG, AC_H_ROOTKIT, AC_H_HOOKAUDIT,
+        AC_H_OVERLAY, AC_H_IMAGEBACK, AC_H_WIN32K, AC_H_MOUSEPOLL,
+        AC_H_SECUREBOOT, AC_H_HVCI, AC_H_OSVERSION, AC_H_VBS,
+        AC_H_IOMMU, AC_H_TPM, AC_H_SUSTHREADS, AC_H_VHD,
+        AC_H_PAGEWALK, AC_H_GAMEINT, AC_H_TAMPER, AC_H_ENV,
+        AC_H_SIGNATURES,
+    };
+
+    for (ULONG i = 0; i < ARRAYSIZE(kTracked); i++)
+    {
+        AC_HANDLER_ID id = kTracked[i];
+        ULONG phase = HandlerGateAllowed(id) ? WIRE_MOD_HB_PHASE_ARMED
+                                             : WIRE_MOD_HB_PHASE_IDLE;
+        (VOID)EventsEmitModuleHeartbeat((ULONG)id, phase, 0);
+    }
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS EventsReportProcessAttach(HANDLE ProcessId, PPS_CREATE_NOTIFY_INFO CreateInfo)

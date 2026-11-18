@@ -3,6 +3,7 @@
 #include "events.h"
 #include "anti_tamper.h"
 #include "wire_records.h"
+#include "strings.h"
 
 #define DMA_MAX_DEVICES         256
 #define DMA_CFG_HEADER_LEN      0x40
@@ -183,8 +184,15 @@ static VOID BuildPdoList(VOID)
 {
     g_PdoCount = 0;
 
+    static const UCHAR encPciDriver[] =
+        { 0x5C^0x2E, 0x44^0x2E, 0x72^0x2E, 0x69^0x2E, 0x76^0x2E, 0x65^0x2E, 0x72^0x2E,
+          0x5C^0x2E, 0x70^0x2E, 0x63^0x2E, 0x69^0x2E };
+
+    WCHAR pciBuf[sizeof(encPciDriver) + 1];
+    CoreStrDecodeW(encPciDriver, sizeof(encPciDriver), 0x2E, pciBuf, ARRAYSIZE(pciBuf));
+
     UNICODE_STRING pciName;
-    RtlInitUnicodeString(&pciName, L"\\Driver\\pci");
+    RtlInitUnicodeString(&pciName, pciBuf);
     PDRIVER_OBJECT pci = NULL;
     NTSTATUS s = ObReferenceObjectByName(&pciName, OBJ_CASE_INSENSITIVE, NULL, 0,
                                          *IoDriverObjectType, KernelMode, NULL,

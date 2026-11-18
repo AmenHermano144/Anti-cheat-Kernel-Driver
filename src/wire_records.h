@@ -2,10 +2,14 @@
 
 #include "core.h"
 
-#define WIRE_RECORD_MAGIC       0x43416352
+#define WIRE_RECORD_MAGIC_BASE  0x43416352u
+#define WIRE_RECORD_MAGIC_MIX   0x9E3779B1u
 #define WIRE_RECORD_VERSION     0x01
 
+#define WIRE_MAGIC_FOR(type)    (WIRE_RECORD_MAGIC_BASE ^ ((ULONG)(UCHAR)(type) * WIRE_RECORD_MAGIC_MIX))
+
 #define WIRE_REC_HEARTBEAT      0x24
+#define WIRE_REC_MODULE_HB      0x25
 #define WIRE_REC_PROCESS_ATTACH 0x1E
 #define WIRE_REC_PROCESS_EXIT   0x1F
 #define WIRE_REC_IMAGE_LOAD     0x26
@@ -37,6 +41,9 @@
 #define WIRE_REC_TPM_ATTEST     0x62
 #define WIRE_REC_SUS_THREAD     0x63
 #define WIRE_REC_VHD_MOUNT      0x64
+#define WIRE_REC_HV_TIMING      0x65
+#define WIRE_REC_HWID_HISTORY   0x66
+#define WIRE_REC_TRUST_SIGNAL   0x67
 #define WIRE_REC_TEARDOWN       0x02
 
 #define MP_VERDICT_WAITING      0
@@ -86,7 +93,31 @@
 #define WIRE_HANDLE_FLAG_THREAD      0x0001
 #define WIRE_HANDLE_FLAG_DUP         0x0002
 
+#define TRUST_SIGNAL_KIND_HEURISTIC   1
+#define TRUST_SIGNAL_KIND_INTEGRITY   2
+#define TRUST_SIGNAL_KIND_ANOMALY     3
+#define TRUST_SIGNAL_KIND_ENV         4
+#define TRUST_SIGNAL_KIND_HARDWARE    5
+
+#define TRUST_CONFIDENCE_LOW          25
+#define TRUST_CONFIDENCE_MEDIUM       50
+#define TRUST_CONFIDENCE_HIGH         75
+#define TRUST_CONFIDENCE_CERTAIN     100
+
 #pragma pack(push, 1)
+typedef struct _WIRE_TRUST_SIGNAL
+{
+    ULONG   HandlerId;
+    ULONG   Kind;
+    ULONG   Severity;
+    ULONG   Confidence;
+    ULONG64 NumericValue;
+    ULONG64 ContextPtr;
+    ULONG64 BootCookie;
+    ULONG   GateEpoch;
+    ULONG   Reserved;
+} WIRE_TRUST_SIGNAL, *PWIRE_TRUST_SIGNAL;
+
 typedef struct _WIRE_RECORD_HEADER
 {
     ULONG   Magic;
@@ -105,6 +136,20 @@ typedef struct _WIRE_HEARTBEAT
     ULONG   InitState;
     ULONG   Reserved;
 } WIRE_HEARTBEAT, *PWIRE_HEARTBEAT;
+
+#define WIRE_MOD_HB_PHASE_ARMED      1
+#define WIRE_MOD_HB_PHASE_WORKING    2
+#define WIRE_MOD_HB_PHASE_IDLE       3
+
+typedef struct _WIRE_MODULE_HEARTBEAT
+{
+    ULONG   HandlerId;
+    ULONG   Phase;
+    ULONG64 TscTick;
+    ULONG   GateEpoch;
+    ULONG   Flags;
+    ULONG64 BootCookie;
+} WIRE_MODULE_HEARTBEAT, *PWIRE_MODULE_HEARTBEAT;
 
 typedef struct _WIRE_PROCESS_ATTACH
 {
