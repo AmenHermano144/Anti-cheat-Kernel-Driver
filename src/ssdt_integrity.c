@@ -9,14 +9,13 @@
 
 // kernel syscall dispatcher integrity.
 //
-// vanguard's syscall-hook detector (vgk 1.19.1.8, etw id 0xf33, 24-slot
-// dispatcher at 0x1400cd958) uses a stack-walk / frame rewrite path we
-// deliberately do not copy — it is not hvci-safe and the matching patchguard
-// contract is fragile across windows builds. this module reaches the same
-// signal from the other side: the dispatcher body and every hot nt* syscall
-// are read physically via the page walker, hashed with sha-256, and
-// compared against a boot baseline. a virtual-address hook can lie to any
-// read that goes through the kernel's own RIP; a physical read via
+// stack-walk / frame-rewrite syscall interception is deliberately avoided
+// here — it is not hvci-safe and the matching patchguard contract is
+// fragile across windows builds. this module reaches the same signal
+// passively: the dispatcher body and every hot nt* syscall are read
+// physically via the page walker, hashed with sha-256, and compared
+// against a boot baseline. a virtual-address hook can lie to any read
+// that goes through the kernel's own RIP; a physical read via
 // MmCopyMemory(MM_COPY_MEMORY_PHYSICAL) returns the actual bytes the cpu
 // will execute, which is what we want to verify.
 //

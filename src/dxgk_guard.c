@@ -7,15 +7,13 @@
 #include "anti_tamper.h"
 #include "handler_gate.h"
 
-// dxgkrnl prologue integrity. the egg2 fingerprint vgk 1.19.2 uses on
-// dxgkrnl (hde64 disassembly to resolve internal targets) exists to catch
-// esp overlay drivers that patch the display pipeline — present, flip,
-// render km, framebuffer map paths. we don't need an in-driver
-// disassembler to reach the same signal: hashing the first 32 KB of
-// dxgkrnl via the page walker covers the entry point, the dispatch
-// vtables, and every interior function that lives within range of a
-// typical e9/ff25 detour from the entry area. anything beyond that range
-// is image_backing's full-text scan territory.
+// dxgkrnl prologue integrity. the surface we want to cover is esp overlay
+// drivers that patch the display pipeline — present, flip, render km,
+// framebuffer map paths. hashing the first 32 KB of dxgkrnl via the page
+// walker covers the entry point, the dispatch vtables, and every interior
+// function that lives within range of a typical e9/ff25 detour from the
+// entry area. anything beyond that range is image_backing's full-text
+// scan territory.
 //
 // baseline is lazy. dxgkrnl is not resident when the driver initializes
 // (it loads with the display stack when the first vga session comes up),

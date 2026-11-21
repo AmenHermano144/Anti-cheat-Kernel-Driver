@@ -105,14 +105,13 @@ typedef NTSTATUS (NTAPI *PFN_ZwQueryValueKey)(
 
 // descriptor-based import resolution. the flat pointer table we used to ship
 // had every AcXxx = resolved_addr sitting in .data, where any scanner that
-// knew what to look for would find our full list instantly. the vanguard vgk
-// 1.19.2 writeup documented their current layout — a 240-row table of
-// { byte index, qword xor_key, qword encoded_ptr } rewritten at every boot;
-// a static .data scan after the fact never recovers the live pointers. this
-// port keeps the interface identical (AcMmCopyMemory(...) still looks like a
-// function pointer call at every call site) but moves the storage to the
-// same shape: one 24-byte descriptor per api with a per-entry xor key, and a
-// single accessor that xors on demand right before the indirect call.
+// knew what to look for would find our full list instantly. this layout —
+// a row of { byte index, qword xor_key, qword encoded_ptr } rewritten at
+// every boot — makes a static .data scan after the fact useless for
+// recovering the live pointers. the public interface stays identical
+// (AcMmCopyMemory(...) still looks like a function pointer call at every
+// call site): one 24-byte descriptor per api with a per-entry xor key, and
+// a single accessor that xors on demand right before the indirect call.
 typedef struct _AC_IMPORT_DESC
 {
     ULONG64 EncodedPtr;

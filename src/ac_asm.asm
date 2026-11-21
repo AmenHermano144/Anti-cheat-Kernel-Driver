@@ -9,9 +9,8 @@ EXTERN g_AcImports:BYTE
 .CODE
 
 ; ULONG64 AcResolveImportA(ULONG idx)
-;   type-a resolver tail, in asm so the xor-decode sequence lives in .text
-;   instead of being inlined into every caller's own function body. matches
-;   the vgc 1.19.2 type-a shape exactly:
+;   resolver tail, in asm so the xor-decode sequence lives in .text instead
+;   of being inlined into every caller's own function body. shape:
 ;
 ;     mov  rax, qword ptr [table + idx*24 + 0]   ; encoded ptr
 ;     xor  rax, qword ptr [table + idx*24 + 8]   ; per-descriptor key

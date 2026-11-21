@@ -172,11 +172,18 @@ typedef struct _WIRE_IMAGE_LOAD
     UCHAR   ImagePath[520];
 } WIRE_IMAGE_LOAD, *PWIRE_IMAGE_LOAD;
 
+#define BYOVD_MATCH_SUBSTRING_MANUAL    0x00000001
+#define BYOVD_MATCH_SUBSTRING_LOL       0x00000002
+#define BYOVD_MATCH_SHA256_LOL          0x00000004
+#define BYOVD_MATCH_FILE_HASH_FAILED    0x00000100
+
 typedef struct _WIRE_BYOVD_HIT
 {
     ULONG64 ImageBase;
     ULONG   ImageSize;
+    ULONG   MatchFlags;
     ULONG64 Fnv1a64;
+    UCHAR   ImageSha256[32];
     USHORT  MatchedPathLen;
     UCHAR   MatchedPath[260];
     USHORT  ImagePathLen;

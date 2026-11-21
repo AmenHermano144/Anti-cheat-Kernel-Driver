@@ -21,7 +21,7 @@ A Windows x64 kernel-mode anti-cheat driver designed for competitive multiplayer
 </details>
 
 <details>
-<summary><b>Detection surfaces</b> — 22 detectors, what each one closes</summary>
+<summary><b>Detection surfaces</b> — 24 detectors, what each one closes</summary>
 
 - [7. Detection surfaces](#7-detection-surfaces)
   - [7.1 BYOVD scanner](#71-byovd-scanner)
@@ -46,6 +46,8 @@ A Windows x64 kernel-mode anti-cheat driver designed for competitive multiplayer
   - [7.20 TPM 2.0 attestation](#720-tpm-20-attestation)
   - [7.21 Suspended / unbacked-start thread detector](#721-suspended--unbacked-start-thread-detector)
   - [7.22 VHD / Hyper-V storage mount detector](#722-vhd--hyper-v-storage-mount-detector)
+  - [7.23 SSDT / KiSystemCall64 integrity](#723-ssdt--kisystemcall64-integrity)
+  - [7.24 DXGK guard (dxgkrnl bulk hash)](#724-dxgk-guard-dxgkrnl-bulk-hash)
 
 </details>
 
@@ -79,6 +81,8 @@ A Windows x64 kernel-mode anti-cheat driver designed for competitive multiplayer
   - [17.3 Session key bound to the caller's PID](#173-session-key-bound-to-the-callers-pid)
   - [17.4 Combined effect](#174-combined-effect)
   - [17.5 Hash-based kernel import resolution](#175-hash-based-kernel-import-resolution)
+  - [17.6 Descriptor-encoded import table](#176-descriptor-encoded-import-table)
+  - [17.7 Readiness gate + return-site anchor](#177-readiness-gate--return-site-anchor)
 - [18. Roadmap](#18-roadmap)
 - [19. Diagram authoring notes](#19-diagram-authoring-notes)
 
@@ -135,7 +139,8 @@ Only `DriverEntry` runs synchronously. Device registration, callback installatio
 | File | Role |
 |---|---|
 | `driver_entry.c` | DriverEntry, deferred init worker, DACL hardening, DriverUnload, callback plumbing |
-| `anti_tamper.{c,h}` | Boot cookie XOR-pair, LSTAR / DEBUGCTL / stack-cookie checks |
+| `anti_tamper.{c,h}` | Boot cookie XOR-pair, LSTAR / DEBUGCTL / stack-cookie checks, readiness XOR-pair (`InitReadyFlag`) that gates `HandleMux` until every baseline module is armed |
+| `ac_anchor.{c,h}` | Return-site anchor — captures `DriverStart` / `DriverSize` from the kldr entry at `DriverEntry` time; `AcAnchorCheckCallerRip()` uses `_ReturnAddress()` to validate every IOCTL caller's RIP against the driver's own `.text` range so a transplanted dispatcher running from a relocated copy fails the check |
 | `nmi_watchdog.{c,h}` | NMI callback + cross-CPU sweep via `HalSendNMI` |
 | `env_checks.{c,h}` | Safe boot, hypervisor cpuid gate, kernel-debugger probe, module enumeration |
 | `ioctl.{c,h}` | Major function dispatch and IOCTL handlers |
@@ -154,14 +159,14 @@ Only `DriverEntry` runs synchronously. Device registration, callback installatio
 | `exec_region_scan.{c,h}` | `SystemBigPoolInformation` sweep; emits `UNBACKED_EXEC` for non-paged allocations ≥ 256 B that fall outside any known kernel module |
 | `input_integrity.{c,h}` | Snapshots `MouClass`/`KbdClass` service-callback slots inside the upper filter's `DeviceExtension`; emits `INPUT_HIJACK` on drift |
 | `tamper_rootkit.{c,h}` | Pattern-resolves `PiDDBCacheTable` and `MmUnloadedDrivers`, snapshots counts + FNV, emits `PIDDB_TAMPER` / `MMUNLOADED_TAMPER` on silent mutation |
-| `hook_audit.{c,h}` | `PsSetCreateThreadNotifyRoutine` + `ObRegisterCallbacks` + user-image heuristic over protected game PIDs; emits `HOOK_AUDIT` / `HANDLE_AUDIT` for the `SetWindowsHookEx` / `SetProp[2]` abuse surface Vanguard captures through SSDT detours |
+| `hook_audit.{c,h}` | `PsSetCreateThreadNotifyRoutine` + `ObRegisterCallbacks` + user-image heuristic over protected game PIDs; emits `HOOK_AUDIT` / `HANDLE_AUDIT` for the `SetWindowsHookEx` / `SetProp[2]` abuse surface — the user-mode plumbing for parasite-DLL injection and foreign window-ownership mutation against the game process |
 | `overlay_detect.{c,h}` | Overlay detector: parses window extended-style flags pushed from the companion, walks the owner's parent chain (built from `PsSetCreateProcessNotifyRoutineEx`), checks for a whitelisted shell ancestor, matches cheat-style class names, and sets bits on a module-wide flag variable; emits `OVERLAY_DETECT` |
 | `dma_detect.{c,h}` | DMA-card detector: enumerates PCI config space via `HalGetBusDataByOffset`, fingerprints known DMA FPGA VID:DID (pcileech-fpga / Screamer / LeetDMA / Captain-DMA / ZDMA), walks the PCIe extended capability chain for a zeroed Device Serial Number, cross-checks against the `\Driver\pci` PDO list for hidden devices, and diffs each heartbeat scan against a boot baseline for hot-plug / header-type mutation; emits `DMA_HIT` |
 | `page_walker.{c,h}` | Read-only x64 page-table walker (PML5/PML4/PDPT/PD/PT) via `MmCopyMemory(MM_COPY_MEMORY_PHYSICAL)`; detects LA57, MAXPHYADDR; resolves VA→PA with accumulated R/W/U/NX flags; handles 4K / 2M / 1G leaves; exposes `PwReadVirtualRange` for gap-tolerant VA reads |
 | `image_backing.{c,h}` | Image-backing integrity scanner driven by `page_walker`: per-module PE parse through physical reads, SHA-256 of the first executable section, per-leaf classification (RWX, writable .text, NX cleared, large-page backing), hole-ratio and hash-drift diff vs. the boot baseline; emits `PAGE_WALK_ANOMALY` |
 | `win32k_guard.{c,h}` | Session-space inline-hook detector for `win32kbase!SynthesizeMouseInput`: attaches to a GUI session process (winlogon / explorer) so win32k is addressable, pattern-locates the function, hashes a 256-byte sample via `page_walker`, diffs each heartbeat; also flags a jmp-shaped prologue (`E9 ??`, `FF 25`, `mov rax, imm64; jmp rax`); emits `WIN32K_HOOK` |
-| `mouse_polling.{c,h}` | Passive polling-statistics detector inspired by Vanguard's anti-Macku / anti-KMBox check: a 1 ms `KTIMER` + DPC samples each `MouClass` device's `DeviceExtension.WritePointer` without hooking anything, derives per-packet Δt, rolls a 100-sample window, and computes σ, burst rate (Δt < 0.5 ms), instant Hz, and max-packets-per-tick; emits `MOUSE_POLLING` with verdict `WAITING` / `NATURAL` / `SUSPICIOUS` / `INJECTION` |
-| `secureboot_attest.{c,h}` | Secure Boot ↔ TPM PCR cross-check (concept reversed from FACEIT / VGK): reads the `SecureBoot` and `SetupMode` EFI variables (`EFI_GLOBAL_VARIABLE_GUID`), `SystemSecureBootInformation` (class `0x91`), the `UEFISecureBootEnabled` registry value, and submits `TPM2_PCR_Read` against `\Device\TPM` (falling back to `\Device\TCM`) for PCR[0] (CRTM / firmware), PCR[7] (Secure Boot policy — PK/KEK/db/dbx), and PCR[14] (boot authority / CustomKernelSigners); fails closed when no TPM is addressable, exposes each software claim independently so disagreements are themselves a signal, re-reads PCR[7] at every heartbeat to catch runtime TPM-answer drift, and emits `WIRE_REC_SECUREBOOT_REPORT` with the full set of flags, state and raw SHA-256 digests |
+| `mouse_polling.{c,h}` | Passive polling-statistics detector for synthetic-input hardware (Macku / KMBox-class devices): a 1 ms `KTIMER` + DPC samples each `MouClass` device's `DeviceExtension.WritePointer` without hooking anything, derives per-packet Δt, rolls a 100-sample window, and computes σ, burst rate (Δt < 0.5 ms), instant Hz, and max-packets-per-tick; emits `MOUSE_POLLING` with verdict `WAITING` / `NATURAL` / `SUSPICIOUS` / `INJECTION` |
+| `secureboot_attest.{c,h}` | Secure Boot ↔ TPM PCR cross-check: reads the `SecureBoot` and `SetupMode` EFI variables (`EFI_GLOBAL_VARIABLE_GUID`), `SystemSecureBootInformation` (class `0x91`), the `UEFISecureBootEnabled` registry value, and submits `TPM2_PCR_Read` against `\Device\TPM` (falling back to `\Device\TCM`) for PCR[0] (CRTM / firmware), PCR[7] (Secure Boot policy — PK/KEK/db/dbx), and PCR[14] (boot authority / CustomKernelSigners); fails closed when no TPM is addressable, exposes each software claim independently so disagreements are themselves a signal, re-reads PCR[7] at every heartbeat to catch runtime TPM-answer drift, and emits `WIRE_REC_SECUREBOOT_REPORT` with the full set of flags, state and raw SHA-256 digests |
 | `hvci_require.{c,h}` | HVCI / Core Isolation requirement check: queries `SystemCodeIntegrityInformation` (class `103`) for the live `CodeIntegrityOptions` bitmap, probes `CPUID.1:ECX[31]` + leaf `0x40000000` for hypervisor presence and vendor id (`Microsoft Hv` vs anything else), reads the `DeviceGuard\EnableVirtualizationBasedSecurity` + `DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity\Enabled` registry DWORDs, cross-checks the layers, classifies into `UNSUPPORTED` / `AVAILABLE_OFF` / `AUDIT_ONLY` / `ENFORCING` / `STRICT` / `TEST_SIGNING`, and emits `WIRE_REC_HVCI_REPORT` + `WIRE_REC_TAMPER(AC_TAMPER_REASON_HVCI)` when HVCI is not actually enforcing or when the state drifts at runtime |
 | `os_version_gate.{c,h}` | Advisory Windows build gate (informational, not enforcing): calls `RtlGetVersion` and reads `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\UBR` to capture major/minor/build/UBR/product-type/suite, classifies against a minimum build (default `26200` for Windows 11 25H2), emits `WIRE_REC_OS_VERSION` with full version metadata and a flag bitmap the backend can use to soft-kick or audit; never raises tamper on its own |
 | `vbs_require.{c,h}` | VBS / VSM (Virtualization-Based Security — the secure kernel) requirement: `SystemIsolatedUserModeInformation` (class `165`) for the first flag byte that indicates secure kernel running + HVCI running + firmware page protection + encryption key availability, CPUID hypervisor probe for presence + vendor, `DeviceGuard\EnableVirtualizationBasedSecurity` + `RequirePlatformSecurityFeatures` + LSA `LsaCfgFlags` registry, cross-check for policy-vs-live disagreement, classify into `UNSUPPORTED` / `AVAILABLE_OFF` / `ENABLED` / `STRICT`, runtime drift on the IUM flag byte; emits `WIRE_REC_VBS_REPORT` + `TAMPER(VBS)` when the secure kernel is not running |
@@ -169,10 +174,13 @@ Only `DriverEntry` runs synchronously. Device registration, callback installatio
 | `tpm_attest.{c,h}` | TPM 2.0 attestation: opens `\Device\TPM` (falls back to `\Device\TCM`), submits `TPM2_GetCapability(TPM_CAP_TPM_PROPERTIES)` for manufacturer + vendor-string + firmware-version-1/2 via per-property round-trips, submits `TPM2_ReadPublic(0x81010001)` to extract the RSA-2048 EK's `TPM2B_PUBLIC` + `TPM2B_NAME`, hashes the public area with SHA-256 for a stable TPM identity, accepts a 32-byte companion-pushed challenge nonce via `IOCTL_AC_PUSH_TPM_NONCE`, pulls the current PCR[0]/PCR[7]/PCR[14] digests from `secureboot_attest`'s report, and produces a composite `BundleSha256 = SHA-256(nonce || EK_name || EK_public_hash || PCR[0] || PCR[7] || PCR[14])` that the backend verifies as a (nonce-bound, replay-safe) attestation; emits `WIRE_REC_TPM_ATTEST` + `TAMPER(TPM_ATTEST)` on EK drift between boot and heartbeat |
 | `sus_threads.{c,h}` | Suspended / unbacked-start thread detector gated on protected game PIDs: enumerates `SystemExtendedProcessInformation` every heartbeat, pulls `StartAddress` + `Win32StartAddress` + `WaitReason` for each thread of each protected process, walks the owning process's PEB `InLoadOrderModuleList` through `UsermodWalkProcessModules` to collect `[base, base+size)` ranges, and flags threads whose `Win32StartAddress` (or fallback `StartAddress`) does not land in any loaded module — the terminal observable of reflective loaders, manual mappers, and thread-hijack shellcode stubs. Also maintains a 256-slot `{pid,tid,streak}` tracker that keeps count of how many consecutive heartbeats each TID stays in `KWAIT_REASON Suspended`; a thread suspended for ≥ 3 passes trips `STUCK_SUSPENDED` (the pattern of manual-mapper stubs that get spawned suspended, patched, then never resumed). Reap of stale TIDs runs per-tick so the slot table does not grow. Emits `WIRE_REC_SUS_THREAD` + `TAMPER(SUS_THREAD)` on composite `SUSPICIOUS` |
 | `vhd_detect.{c,h}` | Virtual-disk mount detector: references `\Driver\vhdmp` (Microsoft VHD miniport), `\Driver\storvsp` (Hyper-V storage VSP), `\Driver\arcsas` via `ObReferenceObjectByName` and walks each `DriverObject->DeviceObject->NextDevice` chain, snapshotting every PDO exposed at boot as baseline; each heartbeat re-walks the chains and flags any device pointer not in the baseline as `VHD_FLAG_HOTPLUG_MOUNT` — the canonical loader shape for a cheat that boots a signed loader off a VHD mounted post-game-start so artifacts leave no trace on the physical disk after unmount. Resolves the DOS name through `IoVolumeDeviceToDosName` for diagnostics (clears `VHD_FLAG_MISSING_DOSNAME` on success) and captures the lower device via `IoGetLowerDeviceObject`. Emits `WIRE_REC_VHD_MOUNT` for every mount with `VHD_FLAG_PRESENT_AT_BOOT` at baseline and `VHD_FLAG_HOTPLUG_MOUNT | SUSPICIOUS` + `TAMPER(VHD_MOUNT)` on verify |
+| `ssdt_integrity.{c,h}` | SSDT / `KiSystemCall64` dispatcher integrity, passive and HVCI-friendly: physical-reads 512 B at `LSTAR` and 128 B at each of 10 hot `Nt*` export prologues via `page_walker`, SHA-256 at baseline + heartbeat, prologue shape check for `E9 / FF 25 / mov rax,imm64;jmp rax / mov r10,imm64;jmp r10`. Also pattern-scans `KiSystemCall64` for the rip-relative `lea r10/r11` that resolves `KeServiceDescriptorTable`, validates the descriptor shape (ServiceTable inside ntoskrnl, `TableSize` ∈ [0x80, 0x400]), and hashes the descriptor (32 B) + the full `ServiceTable` array (`TableSize*4` B). Emits `WIRE_REC_SSDT_HOOK` (type `0x68`) + `TAMPER(0x1017)` on any drift, with separate flag bits for syscall / export / KSDT / service-table drift. The physical read returns the actual bytes the CPU will execute, which no virtual-address hook can lie about |
+| `dxgk_guard.{c,h}` | Display-pipeline integrity: resolves `dxgkrnl.sys` base + size from the kldr list, physical-hashes the first 32 KB of the image via `page_walker` at baseline + heartbeat, and flags inline-JMP prologues or bulk drift. Baseline is lazy — `dxgkrnl` loads with the display stack, often after `DriverEntry`, so the worker retries baseline each heartbeat until it succeeds and surfaces `DXGK_HOOK_FLAG_NOT_LOADED` once at attempt 10 if it never does. Also detects module relocation (`MODULE_SHIFTED`) and re-baselines against the new address rather than emitting a drift stream. Emits `WIRE_REC_DXGK_HOOK` (type `0x69`) + `TAMPER(0x101A)`; this is the surface ESP / aimbot overlay drivers hit when they patch `DxgkPresent` / flip / render-km paths |
 | `usermod.{c,h}` | User-mode module walker (PEB `InLoadOrderModuleList`) |
 | `strings.{c,h}` | Kernel-safe string primitives, FNV1a 32/64, memmem, hex formatter |
 | `core.h` | Shared types, pool tags, device names, status codes |
 | `imports.h` | NT/ZW signatures not exposed by the WDK headers |
+| `imports_hash.{c,h}` | Descriptor-encoded kernel import table: each API lives as a 24-byte `AC_IMPORT_DESC { EncodedPtr, XorKey, Reserved }`, per-entry key derived from `BootCookie ^ nameHash ^ (idx*0x9E3779B97F4A7C15) ^ rdtsc` so two boots of the same build produce completely different encoded tables. `AcResolveImportA` (`ac_asm.asm`) does the decode in `.text` as a short stub (`lea r10,[g_AcImports]; lea r11,[rcx+rcx*2]; mov rax,[r10+r11*8]; xor rax,[r10+r11*8+8]; ret`) so no raw pointer ever lives at a resolvable address in `.data`. Also exposes `AcImportsResolveNtExportByHash` / `AcImportsFindModule` for `ssdt_integrity` and `dxgk_guard` |
 
 ---
 
@@ -186,6 +194,13 @@ DriverEntry
  │    seed = perf ^ tsc ^ (pid << 17)
  │    BootCookie[0] = seed
  │    BootCookie[1] = ~seed          // XOR pair: a ^ b == -1
+ │    InitReadyFlag[0] = 0; InitReadyFlag[1] = 0  // readiness xor-pair starts cleared
+ │
+ ├─ AcAnchorInit(DriverObject)
+ │    DriverStart = DriverObject->DriverStart  (fallback: kldr entry DllBase)
+ │    DriverSize  = DriverObject->DriverSize   (fallback: kldr entry SizeOfImage)
+ │
+ ├─ AcImportsResolve(DriverObject)     // writes encoded descriptors into g_AcImports[]
  │
  ├─ EnvRunBootGates()
  │    ├─ InitSafeBootMode  → fail if non-zero
@@ -223,7 +238,10 @@ DriverEntry
         ├─ HwidRefreshTpmBinding               fold TPM EK hash into HWID composite, re-emit extended
         ├─ SusThreadsInit                      256-slot per-TID suspend-streak tracker
         ├─ VhdDetectInit + Snapshot            \Driver\vhdmp / storvsp / arcsas PDO baseline
-        └─ CoreStartWorker()                   30 s heartbeat loop
+        ├─ SsdtIntegrityInit + Baseline        KiSystemCall64 hash + KSDT scan + hot Nt* prologue hashes
+        ├─ DxgkGuardInit + Baseline            dxgkrnl bulk hash (lazy — retries from heartbeat if absent)
+        ├─ CoreStartWorker()                   30 s heartbeat loop
+        └─ AcTamperSetInitComplete()           flip readiness xor-pair → HandleMux unblocks
 ```
 
 The heartbeat loop then fans out every 30 s into one documented producer per detector, each of which writes typed records into the SPSC ring:
@@ -257,13 +275,15 @@ flowchart LR
     TPM["TpmAttestVerify<br/>EK public hash · bundle nonce+PCRs"]:::det
     SUS["SusThreadsVerify<br/>protected-PID threads · suspend streak · unbacked start"]:::det
     VHD["VhdDetectVerify<br/>vhdmp/storvsp/arcsas PDO hot-plug diff"]:::det
+    SSDT["SsdtIntegrityVerify<br/>KiSystemCall64 hash · KSDT + ServiceTable · Nt* prologues"]:::det
+    DXGK["DxgkGuardVerify<br/>dxgkrnl bulk hash · jmp entry · module shift"]:::det
     HA["hook_audit (async)<br/>thread notify · ObReg · image load"]:::det
     MPD["mouse_polling DPC (1 ms)<br/>passive WritePointer sampling"]:::det
     FLUSH["ChannelFlushPending"]:::det
 
     RING[("SPSC wire ring")]:::ring
 
-    T --> NMI1 --> NMI2 --> HB --> PML --> KL --> EX --> IN --> TR --> DMA --> PW --> W32K --> MPV --> SB --> HV --> OSG --> VBS --> IOM --> TPM --> SUS --> VHD --> FLUSH
+    T --> NMI1 --> NMI2 --> HB --> PML --> KL --> EX --> IN --> TR --> DMA --> PW --> W32K --> MPV --> SB --> HV --> OSG --> VBS --> IOM --> TPM --> SUS --> VHD --> SSDT --> DXGK --> FLUSH
     MPD -.updates window-.-> MPV
     HA -.-> RING
     NMI2 -.-> RING
@@ -285,6 +305,8 @@ flowchart LR
     TPM -.ek drift / bundle.-> RING
     SUS -.suspicious thread.-> RING
     VHD -.hotplug mount.-> RING
+    SSDT -.syscall / KSDT / Nt* drift.-> RING
+    DXGK -.dxgkrnl bulk drift.-> RING
 ```
 
 ---
@@ -302,13 +324,15 @@ The DACL is applied with `ObSetSecurityObjectByPointer` after device creation. B
 
 ## 6. Anti-tamper
 
-Three complementary checks:
+Five complementary checks:
 
 1. **LSTAR (`0xC0000082`).** Snapshotted during `AcTamperArm` into an XOR-pair. On every IOCTL dispatch and every NMI callback the current value is compared to the reference. Mismatch → tamper event is enqueued and the MSR is rewritten to the known-good value.
 2. **DEBUGCTL (`0x1D9`).** The LBR bit is checked from NMI context. If userland or a hypervisor flipped it to steal callstacks, we observe it where we can't be masked.
 3. **Stack cookie.** A per-boot XOR-pair derived from `__rdtsc`. Mismatch is routed through the tamper event producer.
+4. **Readiness XOR-pair.** `InitReadyFlag[0..1]` is cleared at boot and only flipped at the very end of `CoreDeferredInit`, after every baseline module has armed and `CoreStartWorker` returned OK. Verification is `a ^ b == 0xD15EA5EDBADC0FFE ^ CoreBootCookie()`. `HandleMux` consults this gate before every post-handshake operation and returns `CORE_AC_STATUS_NO_SESSION` + `TAMPER(AC_TAMPER_REASON_READINESS)` if the pair is not armed. Anything that zeros the pair at runtime (corruption, driver-image mutation that re-zeros `.data`) immediately locks the IOCTL surface instead of silently serving stale state.
+5. **Return-site anchor.** `AcAnchorInit` captures `DriverStart` / `DriverSize` from the kldr entry at `DriverEntry` time. `AcAnchorCheckCallerRip` reads `_ReturnAddress()` at every `HandleMux` entry and verifies the return site lives inside the driver's own `.text` range. A dispatcher transplanted to a relocated copy would run outside our image bounds and trip `TAMPER(AC_TAMPER_REASON_ANCHOR)` with the observed RIP.
 
-Boot cookie, LSTAR reference and stack cookie are stored exclusively as XOR-pairs so a lazy scanner looking for the live value by signature finds nothing.
+Boot cookie, LSTAR reference, stack cookie and readiness flag are all stored exclusively as XOR-pairs so a lazy scanner looking for the live value by signature finds nothing.
 
 ---
 
@@ -316,12 +340,24 @@ Boot cookie, LSTAR reference and stack cookie are stored exclusively as XOR-pair
 
 ### 7.1 BYOVD scanner
 
-Catches vulnerable drivers using two independent signals:
+Catches vulnerable drivers using four independent signals:
 
-- **Substring match (lowercase case-fold Unicode).** 60+ well-known BYOVD names baked in: `winring0`, `rtcore64`, `mhyprot2`, `dbutil_2_3`, `iqvw64`, `winio`, `phymem`, `atillk64`, `rwdrv`, and so on.
+- **Manual substring match (lowercase case-fold Unicode).** A hand-curated list of ~60 names (`winring0`, `rtcore64`, `mhyprot2`, `dbutil_2_3`, `iqvw64`, `winio`, `phymem`, `atillk64`, `rwdrv`, …) baked into `byovd_scanner.c`. Kept separate from the imported feed so a bad upstream entry can never evict a local addition.
+- **loldrivers.io substring match.** 490 additional lowercase basename stems (`.sys`/`.exe` stripped, ≥ 4 chars, not in the Microsoft-component denylist) derived from the loldrivers.io dataset.
+- **loldrivers.io SHA-256 match.** 3,501 on-disk SHA-256 fingerprints baked in; on each kernel image load, the module computes `CryptoSha256File(FullImageName, …)` and compares against the blob. Catches recompiled variants that change strings or TimeDateStamp but keep the same bytes.
 - **PE `TimeDateStamp` denylist.** `driver_ts_blacklist.c` carries timestamps known to belong to signed-but-weaponizable drivers.
 
-Both signals produce `WIRE_REC_BYOVD_HIT` records tagged with `ImageBase`, `ImageSize`, the matched path, and a path FNV1a64.
+All signals produce `WIRE_REC_BYOVD_HIT` records tagged with `ImageBase`, `ImageSize`, a `MatchFlags` bitmap (`SUBSTRING_MANUAL` / `SUBSTRING_LOL` / `SHA256_LOL` / `FILE_HASH_FAILED`), the matched substring, the full image path, a path FNV1a64, and the SHA-256 digest when the file hash succeeded. A single hit can carry multiple flag bits — e.g. a loldrivers entry whose SHA-256 also matches lights both `SUBSTRING_LOL` and `SHA256_LOL` in one record, which the backend can use for confidence weighting.
+
+**Updating the loldrivers feed.** The two LOL arrays live in `src/byovd_blob.inc`, auto-generated by `tools/gen_byovd_list.py`:
+
+```bat
+python tools/gen_byovd_list.py            # pull live feed, overwrite .inc
+python tools/gen_byovd_list.py --dry-run  # summarize without writing
+python tools/gen_byovd_list.py --input drivers.json  # from local snapshot
+```
+
+The generator pulls `https://www.loldrivers.io/api/drivers.json`, filters entries where `Category` contains `"vulnerable"`, extracts lowercase stems from `Tags[]` + legacy `KnownVulnerableSamples[].Filename`, and extracts SHA-256 digests from `KnownVulnerableSamples[].SHA256` and `KnownVulnerableSamples[].Authentihash.SHA256`. The tree ships with a zero-entry placeholder `.inc` so the driver builds even if the generator has never been run.
 
 ### 7.2 PML4 physical walker
 
@@ -394,15 +430,15 @@ Up to `PML4_MAX_WATCHED` (8) processes can be registered concurrently. Entries a
 
 ### 7.9 Protected-process hook / handle audit
 
-`hook_audit.c` closes the attack surface that Vanguard covers with its native hooks on `NtUserSetWindowsHookEx`, `NtUserSetProp` and `NtUserSetProp2` — all three are the user-mode plumbing for parasite-DLL injection and foreign window-ownership mutation against the game process. Core_ac refuses to install an SSDT or inline detour (section 14 of this document); instead it collects the same audit intent through three documented kernel surfaces and gates every signal on the protected-PID set published by `game_integrity`:
+`hook_audit.c` closes the attack surface exposed through `NtUserSetWindowsHookEx`, `NtUserSetProp` and `NtUserSetProp2` — all three are the user-mode plumbing for parasite-DLL injection and foreign window-ownership mutation against the game process. Core_ac refuses to install an SSDT or inline detour (section 14 of this document); instead it collects the same audit intent through three documented kernel surfaces and gates every signal on the protected-PID set published by `game_integrity`:
 
 - **Cross-process thread creation.** `PsSetCreateThreadNotifyRoutine` fires in the context of the thread being created. On every `Create == TRUE` whose target PID is a protected game PID and whose creator PID is not the target, we emit `WIRE_REC_HOOK_AUDIT` with `Operation = REMOTE_THREAD`, caller image path (`SeLocateProcessImageName`), caller TID, target image name (`PsGetProcessImageFileName`), and a KUSER_SHARED timestamp read under `__try/__except`. We also route a `WIRE_REC_TAMPER` with `AC_TAMPER_REASON_REMOTE_THREAD`. This is the terminal observable of SWHE-style injection, CreateRemoteThread, QueueUserAPC-into-a-worker, and most reflective-loader stubs.
 
-- **Handle-right stripping on process / thread opens.** `ObRegisterCallbacks` with altitude `L"320800.4210"` installs a pre-op callback on `PsProcessType` and `PsThreadType` for both `HANDLE_CREATE` and `HANDLE_DUPLICATE`. For every user-mode (`KernelHandle == 0`) cross-process open against a protected target, the callback masks out `PROCESS_TERMINATE | PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE | PROCESS_SET_INFORMATION | PROCESS_SUSPEND_RESUME` on process handles and `THREAD_TERMINATE | THREAD_SUSPEND_RESUME | THREAD_SET_CONTEXT | THREAD_SET_INFORMATION | THREAD_SET_THREAD_TOKEN | THREAD_IMPERSONATE | THREAD_DIRECT_IMPERSONATION` on thread handles, then emits `WIRE_REC_HANDLE_AUDIT` (original mask, stripped mask, caller image path, `WIRE_HANDLE_FLAG_THREAD` / `WIRE_HANDLE_FLAG_DUP`) and a paired `WIRE_REC_HOOK_AUDIT` with `Operation = HANDLE_STRIP`. The matching tamper reason is `AC_TAMPER_REASON_HANDLE_STRIP`. This is the kernel-side analogue of VGK's prefilter path — same decision, no detour.
+- **Handle-right stripping on process / thread opens.** `ObRegisterCallbacks` with altitude `L"320800.4210"` installs a pre-op callback on `PsProcessType` and `PsThreadType` for both `HANDLE_CREATE` and `HANDLE_DUPLICATE`. For every user-mode (`KernelHandle == 0`) cross-process open against a protected target, the callback masks out `PROCESS_TERMINATE | PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE | PROCESS_SET_INFORMATION | PROCESS_SUSPEND_RESUME` on process handles and `THREAD_TERMINATE | THREAD_SUSPEND_RESUME | THREAD_SET_CONTEXT | THREAD_SET_INFORMATION | THREAD_SET_THREAD_TOKEN | THREAD_IMPERSONATE | THREAD_DIRECT_IMPERSONATION` on thread handles, then emits `WIRE_REC_HANDLE_AUDIT` (original mask, stripped mask, caller image path, `WIRE_HANDLE_FLAG_THREAD` / `WIRE_HANDLE_FLAG_DUP`) and a paired `WIRE_REC_HOOK_AUDIT` with `Operation = HANDLE_STRIP`. The matching tamper reason is `AC_TAMPER_REASON_HANDLE_STRIP`. Same decision as an inline prefilter would make, no detour.
 
 - **Parasite-DLL image load.** The existing user-image notify now routes a second pass through `hook_audit`. When the target PID is protected we evaluate the full image path against three independent signals: (1) does it live under `\Windows\System32\`, `\SysWOW64\`, `\WinSxS\`, `\Assembly\` or `\Microsoft.NET\`; (2) does it live under the game executable's own directory (captured on the matching user-image load that triggered the protected-PID registration); (3) does the filename carry a suspect substring (`hook`, `inject`, `overlay`, `cheat`, `aimbot`, `wallhack`, …) and is the file unsigned (`IMAGE_INFO_EX.ImageSignatureLevel == 0 && ImageSignatureType == 0`). Any image that fails system-backed and game-dir checks, or that is unsigned, or that matches a suspect substring, produces `WIRE_REC_HOOK_AUDIT` with `Operation = PARASITE_DLL`, the composed `DecisionFlags`, the full target path, and the loading PID — plus `AC_TAMPER_REASON_HOOK_INJECT`.
 
-The audit record mirrors the field set Vanguard's `VGK_WINDOWS_HOOK_AUDIT` carries — operation code, decision flags, caller image, target image, system time — but every field is derived from documented kernel calls. Nothing hooks `NtUser*`, nothing patches the SSDT, nothing writes to kernel code pages, and the stripping path is HVCI-safe.
+The audit record carries operation code, decision flags, caller image, target image, and system time — every field derived from documented kernel calls. Nothing hooks `NtUser*`, nothing patches the SSDT, nothing writes to kernel code pages, and the stripping path is HVCI-safe.
 
 Protected PIDs are published by `game_integrity.c` whenever a user-image load matches the companion-registered path (`CHANNEL_BLOB_PROCESS`), and cleared on process exit from the shared `PsSetCreateProcessNotifyRoutineEx` sink. Both the thread notify and the object callback no-op when the PID is not in that set, so the hot path cost on normal system traffic is a single interlocked read.
 
@@ -560,7 +596,7 @@ What this does **not** cover yet, and is scheduled next:
 
 ### 7.14 Mouse polling-rate anomaly detector
 
-Direct port of the `MousePollingMonitor` / Vanguard-style jitter analysis into kernel, but **passive — no slot replacement, no code hooking, nothing written into mouclass**. Real USB HID silicon delivers packets with natural jitter the signal injection path cannot reproduce: a physical mouse at 1 kHz has σ(Δt) ≥ 60 µs and almost never produces a packet with Δt < 500 µs; a synthetic burst from `MouseClassServiceCallback` + trampoline or the shadow-IRP strategy delivers packets at rates that are flatly impossible on the USB bus.
+Kernel-side mouse-queue jitter analysis, **passive — no slot replacement, no code hooking, nothing written into mouclass**. Real USB HID silicon delivers packets with natural jitter the signal injection path cannot reproduce: a physical mouse at 1 kHz has σ(Δt) ≥ 60 µs and almost never produces a packet with Δt < 500 µs; a synthetic burst from `MouseClassServiceCallback` + trampoline or the shadow-IRP strategy delivers packets at rates that are flatly impossible on the USB bus.
 
 Detection loop:
 
@@ -591,7 +627,7 @@ What this does **not** cover:
 
 ### 7.15 Secure Boot ↔ TPM PCR attestation
 
-`secureboot_attest.c` answers the question competitive-integrity backends actually care about — *was Secure Boot policy really measured by firmware, or is the OS just repeating a value that user mode wrote in?* It is a direct kernel port of the FACEIT / VGK-style SB attestation shape (concept reversed from Sage-Mage's public `pcr_compare`), rewritten as a Core_ac detection module that fixes every limitation that implementation's own author called out: no classification in `DriverEntry`, fail-closed when the TPM is absent, split software claims instead of OR-ing them, use the `CONFIGURED` state for "keys enrolled, SB off," read `PCR[0]` and `PCR[14]` alongside `PCR[7]`, and keep the raw 32-byte digests rather than a boolean.
+`secureboot_attest.c` answers the question competitive-integrity backends actually care about — *was Secure Boot policy really measured by firmware, or is the OS just repeating a value that user mode wrote in?* The module fails closed when the TPM is absent, splits software claims instead of OR-ing them, uses the `CONFIGURED` state for "keys enrolled, SB off," reads `PCR[0]` and `PCR[14]` alongside `PCR[7]`, and keeps the raw 32-byte digests rather than a boolean, so a backend can audit disagreements between layers rather than taking a single verdict on faith.
 
 Four independent sources are collected at baseline (deferred-init worker, `PASSIVE_LEVEL`):
 
@@ -651,7 +687,7 @@ The collector preserves each 32-byte digest verbatim in the report (and in the w
 | `0x00008000` | `BOOT_AUTHORITY_ZERO`    | `PCR[14]` (boot-authority / CustomKernelSigners) is 32 zero bytes |
 | `0x00010000` | `SUSPICIOUS`             | composite verdict — at least one of the mismatch conditions held |
 
-**What this closes that an EFI-only check cannot.** Anything that only reads `SecureBoot` / `SystemSecureBootInformation` / `UEFISecureBootEnabled` is reading software-visible state. All three can be made to agree while the boot measurements never happened — a bootkit, a kernel patch applied before Core_ac loads, or a spoofed userland response to the service's own query. PCR[7] is written by firmware before the boot manager hands off, and a hypervisor / vTPM that answers `PCR_Read` with whatever is asked can be caught by the runtime drift check (a real TPM's PCR[7] does not change inside a boot session). This is the same idea FACEIT / VGK-style attestation is already built around; moving it in-driver means the measurement is read where the attacker cannot sit between the OS and the attestation hardware through a userland shim.
+**What this closes that an EFI-only check cannot.** Anything that only reads `SecureBoot` / `SystemSecureBootInformation` / `UEFISecureBootEnabled` is reading software-visible state. All three can be made to agree while the boot measurements never happened — a bootkit, a kernel patch applied before Core_ac loads, or a spoofed userland response to the service's own query. PCR[7] is written by firmware before the boot manager hands off, and a hypervisor / vTPM that answers `PCR_Read` with whatever is asked can be caught by the runtime drift check (a real TPM's PCR[7] does not change inside a boot session). Doing this in-driver means the measurement is read where the attacker cannot sit between the OS and the attestation hardware through a userland shim.
 
 **What this does not cover yet** (tracked in §17):
 
@@ -886,6 +922,31 @@ For each emitted mount the module also resolves two diagnostics:
 
 - **Pre-game mount.** A VHD that is already mounted when the driver loads lands in the baseline and emits `PRESENT_AT_BOOT` without tamper. Distinguishing a legitimate always-on VHD from a cheat VHD the player mounted before launching the game is a backend policy call — the record carries the driver name + DOS name + lower device so the backend can allow-list containers / Windows-to-Go disks and treat the rest as suspicious.
 - **Non-Microsoft VHD stacks.** VeraCrypt / BestCrypt / third-party disk encryption that exposes a virtual volume under its own driver name is not in the probe list. Adding a driver is a one-line change to `g_VhdDriverNames[]`; the detection shape (`DriverObject->DeviceObject` walk) is identical.
+
+### 7.23 SSDT / KiSystemCall64 integrity
+
+`ssdt_integrity.c` is a passive, HVCI-friendly detector for syscall-dispatcher patching. It reaches the same signal an inline SSDT hook or a stack-walk / frame-rewrite interceptor would — without hooking anything — by reading the dispatcher and the service-table through the `page_walker` physical-read primitive. A virtual-address hook can lie to any read that goes through the kernel's own RIP; `MmCopyMemory(MM_COPY_MEMORY_PHYSICAL)` returns the actual bytes the CPU will execute, which is what we want to verify.
+
+Three independent surfaces are baselined and re-checked each heartbeat:
+
+- **KiSystemCall64 dispatcher.** `LSTAR` (`0xC0000082`) is read at baseline, its target physical-read for 512 bytes, SHA-256 digested. Each heartbeat re-reads + re-hashes and compares. Any drift raises `SSDT_HOOK_FLAG_SYSCALL_DRIFT`. A prologue-shape detector also flags `JMP_PROLOGUE` when the first bytes match `E9 ?? ?? ?? ??` (rel32 jmp), `FF 25 ?? ?? ?? ??` (abs pointer jmp), `push imm32; ret`, `mov rax, imm64; jmp rax`, or `mov r10, imm64; jmp r10` — the five shapes an inline detour typically installs. `LSTAR_SHIFTED` catches the MSR itself moving between baseline and verify (complementary to the MSR tamper detector).
+
+- **KeServiceDescriptorTable.** A pattern-scan over the first 4 KB of `KiSystemCall64` locates the rip-relative `lea r10, [rip+disp32]` / `lea r11, [rip+disp32]` that the dispatcher uses to resolve the descriptor. Each candidate target is validated as a `KSERVICE_TABLE_DESCRIPTOR`: `ServiceTable` must point inside `ntoskrnl.exe`, and `TableSize` must land in `[0x80, 0x400]`. The first candidate that passes all checks wins. The descriptor's 32 bytes and the full `ServiceTable` array (`TableSize * 4` bytes) are both SHA-256 at baseline; `KSDT_DRIFT` fires on descriptor mutation (wholesale redirect to a shadow table), `SERVICETABLE_DRIFT` fires on per-entry swap. If the scan cannot locate the descriptor on this host, `KSDT_NOT_FOUND` surfaces once so the backend knows this layer is dark on this box rather than silently idle.
+
+- **Hot Nt* export prologues.** 10 export targets — `NtAllocateVirtualMemory`, `NtProtectVirtualMemory`, `NtReadVirtualMemory`, `NtWriteVirtualMemory`, `NtQueryVirtualMemory`, `NtCreateFile`, `NtDeviceIoControlFile`, `NtQuerySystemInformation`, `NtMapViewOfSection`, `NtUnmapViewOfSection` — are resolved through `AcImportsResolveNtExportByHash` and their first 128 bytes are SHA-256 at baseline. Per-export drift raises `EXPORT_DRIFT`. These are the syscalls an injection / memory-scan cheat is most likely to target directly rather than through the SSDT slot.
+
+Emits `WIRE_REC_SSDT_HOOK` (type `0x68`) containing `LstarValue`, `KiSystemCall64Va`, `NtoskrnlBase`, `KeServiceDescriptorTableVa`, `ServiceTableVa`, `ServiceTableSize`, the baseline + observed hashes for the LSTAR region, the KSDT descriptor, the ServiceTable array, and per-export entries with `BaselineHash` / `ObservedHash` / `ObservedFirstBytes` / per-entry `Flags`. Any trip of the drift / jmp-prologue / KSDT-drift mask also routes `WIRE_REC_TAMPER(AC_TAMPER_REASON_SSDT)` with the live LSTAR value as locator.
+
+### 7.24 DXGK guard (dxgkrnl bulk hash)
+
+`dxgk_guard.c` fingerprints the display pipeline. The attacker shape it closes is the ESP / aimbot overlay driver that hooks `DxgkPresent`, flip / render-km, or framebuffer-map paths inside `dxgkrnl.sys`: any such patch rewrites the first few kilobytes of the image, which is exactly what we snapshot.
+
+- **Resolution.** `AcImportsFindModule(FnvI(L"dxgkrnl.sys"))` returns the live base and `SizeOfImage` from the kernel loader list. A boot-time baseline attempt is scheduled, but `dxgkrnl` typically loads with the display stack after `DriverEntry` — so when the base is not yet resolvable, baseline is retried on each heartbeat. If ten consecutive attempts fail, `DXGK_HOOK_FLAG_NOT_LOADED` is surfaced once so the backend knows this detector is dark on this host (headless server, OpenHCK probe, etc.) rather than silently silent.
+- **Hash window.** The first 32 KB (`DXGK_BULK_HASH_BYTES`) is physical-read via `page_walker` and SHA-256 at baseline. 32 KB is chosen to cover the entry point, the dispatch vtables, and every interior function within range of a typical `E9` / `FF 25` detour from the entry area. Anything beyond that range is handled by `image_backing` §7.12's full-text scan.
+- **Verify.** Each heartbeat re-reads + re-hashes the same window. `BULK_DRIFT` fires on hash mismatch. The entry prologue is also checked for the same five jmp-shaped patterns `ssdt_integrity` watches for, raising `JMP_ENTRY`.
+- **Module relocation.** If `dxgkrnl` reloads at a new base between baseline and verify (common during driver updates / display-adapter hot reload), the module records `MODULE_SHIFTED`, re-baselines against the new address, and emits a single event — avoiding a drift stream for an event that is legitimately not a hook.
+
+Emits `WIRE_REC_DXGK_HOOK` (type `0x69`) + `WIRE_REC_TAMPER(AC_TAMPER_REASON_DXGK)` on `BULK_DRIFT` or `JMP_ENTRY`. `MODULE_SHIFTED` and `NOT_LOADED` are informational events (no tamper).
 
 ---
 
@@ -1300,6 +1361,73 @@ What this does *not* change:
 - **Other sensitive imports.** `PsSetCreateThreadNotifyRoutine`, `PsLookupProcessByProcessId`, `KeStackAttachProcess`, `IoVolumeDeviceToDosName` and similar are *not* yet behind the resolver. The scope of this pass was the six highest-signal names; widening the net is mechanical and can grow incrementally.
 
 Cost paid: one PE-export walk at boot, six comparisons per export entry, and a `imports_hash.{h,c}` translation unit of roughly 160 lines total. The runtime footprint is zero after init.
+
+### 17.6 Descriptor-encoded import table
+
+The hash-based resolver (§17.5) stops the drive-by `strings | grep` pass, but the resolved pointers still land in `.data` as a flat table of plaintext function addresses. A scanner that learns to dump `.data` and look for 22 consecutive 8-byte values with the high bits set to the kernel pattern can rebuild our import table trivially. The descriptor-encoded form closes that observation path.
+
+Every resolved API is stored as a 24-byte row:
+
+```c
+typedef struct _AC_IMPORT_DESC {
+    ULONG64 EncodedPtr;    // real_ptr ^ XorKey
+    ULONG64 XorKey;        // per-entry key
+    ULONG64 Reserved;      // boot cookie ^ idx — makes row shape non-uniform
+} AC_IMPORT_DESC;
+```
+
+The per-entry key is derived from four independent bit-sources mixed together:
+
+```c
+key = BootCookie
+    ^ FnvHash(exportName)
+    ^ (idx * 0x9E3779B97F4A7C15ULL)   // golden ratio multiplier
+    ^ (__rdtsc() & 0xFFFFFFFFULL);    // per-resolution timestamp low 32
+```
+
+Two consequences:
+
+- **Two boots of the same build produce completely different encoded tables.** The boot cookie, the `rdtsc` low bits, and the loader's ASLR slide for `ntoskrnl` all change per boot, and the key mixes two of those directly while the encoded pointer mixes the third. A diff of `.data` between two captures of the same image shows every row changed.
+- **A static scanner cannot enumerate our imports from `.data` alone.** Without knowing the per-entry key, the encoded pointers look like random 64-bit garbage. Learning one key doesn't help with the next — they're independently derived.
+
+Decoding happens in `.text` through a short asm stub in `ac_asm.asm`:
+
+```asm
+AcResolveImportA PROC
+    lea     r10, [g_AcImports]
+    lea     r11, [rcx + rcx*2]          ; idx * 3 (24-byte stride / 8)
+    mov     rax, qword ptr [r10 + r11*8 + 0]   ; EncodedPtr
+    xor     rax, qword ptr [r10 + r11*8 + 8]   ; XorKey
+    ret
+AcResolveImportA ENDP
+```
+
+Keeping the decode in `.text` as a dedicated stub (rather than inlined into every caller) means the XOR-decode pattern lives in exactly one place that a signature scanner can learn — and even once learned, all it tells the scanner is "this driver has a descriptor-resolved import table", not where any specific API is. The call-site cost over the previous flat-pointer design is one `call` + one `ret` per import call; measured overhead is zero in practice because every `AcXxx` target is itself a kernel function that takes far longer than a thunk.
+
+The accessor `AcResolveImport(idx)` is a `__forceinline` wrapper over `AcResolveImportA`, so the 93 call sites in the driver didn't change — `AcMmCopyMemory(...)` still reads as a plain function-pointer call at the source level.
+
+Helper exports `AcImportsGetNtBase()`, `AcImportsGetNtSize()`, `AcImportsResolveNtExportByHash(hash)`, and `AcImportsFindModule(hash, &base, &size)` give `ssdt_integrity` and `dxgk_guard` access to the cached ntoskrnl layout and the ability to resolve arbitrary module / export by hash without duplicating the kldr walker.
+
+### 17.7 Readiness gate + return-site anchor
+
+Two small checks sit at the top of `HandleMux`, before the session-active test:
+
+**Readiness gate.** `g_Core.InitReadyFlag[0..1]` is an XOR-pair cleared at `AcTamperInitBootCookie` time and only armed at the very last line of `CoreDeferredInit`, after `CoreStartWorker` returned OK. The armed invariant is:
+
+```
+InitReadyFlag[0] ^ InitReadyFlag[1] == 0xD15EA5EDBADC0FFE ^ CoreBootCookie()
+```
+
+`AcTamperIsInitComplete()` reads both halves and compares the XOR. `HandleMux` rejects post-handshake operations with `CORE_AC_STATUS_NO_SESSION` + `WIRE_REC_TAMPER(AC_TAMPER_REASON_READINESS)` whenever the invariant fails. Two effects:
+
+- **A companion that races the deferred-init worker cannot drain state partway through init.** The current design already defers device DACL application, callback installation, and baseline snapshotting through the worker; the readiness gate makes it explicit that `HandleMux` is dark until every one of those is armed.
+- **Any tamper that zeros `.data` to defuse the driver automatically locks the IOCTL surface.** An attacker who zeroes the flag halves fails the XOR invariant and gets refused instead of continuing to see the pre-init state.
+
+Both halves are stored as independent 64-bit values whose relation is not `a ^ b == -1` but `a ^ b == magic ^ boot_cookie` — a scanner that spots the pattern of boot-cookie XOR-pairs still cannot recover either half without knowing the magic.
+
+**Return-site anchor.** `AcAnchorInit` captures `DriverStart` and `DriverSize` from `DriverObject` during `DriverEntry` (falling back to the kldr entry's `DllBase` / `SizeOfImage` if the loader zero-fills them). `AcAnchorCheckCallerRip()` reads `_ReturnAddress()` at every `HandleMux` entry and verifies the return site falls inside `[DriverStart, DriverStart + DriverSize)`. If the dispatcher was transplanted — our `.text` relocated or a copy was patched into a foreign page — the return site lands outside our image and the check fails with `WIRE_REC_TAMPER(AC_TAMPER_REASON_ANCHOR)` + `CORE_AC_STATUS_TAMPER`.
+
+The anchor check is cheap (one compare against two cached values) and runs on every multiplexed operation after readiness is confirmed. Combined with the descriptor-encoded import table and the readiness gate, the IOCTL surface is now covered by three independent checks per post-handshake operation: *we are initialised*, *we are running from where we were linked*, and *our resolver is intact (XOR-decode succeeds)*.
 
 ---
 
