@@ -44,6 +44,10 @@ typedef struct _CORE_AC_GLOBAL
     LARGE_INTEGER       BootPerfCounter;
     ULONG64             BootCookie[2];
     ULONG64             LstarReference[2];
+    ULONG64             InitReadyFlag[2];
+    ULONG_PTR           DriverStart;
+    ULONG               DriverSize;
+    ULONG               Reserved0;
 
     volatile LONG       SessionActive;
     GUID                SessionGuid;

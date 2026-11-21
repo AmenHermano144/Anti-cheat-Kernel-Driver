@@ -129,6 +129,8 @@
     <ClCompile Include="src\ac_anchor.c" />
     <ClCompile Include="src\hv_probe.c" />
     <ClCompile Include="src\hwid_history.c" />
+    <ClCompile Include="src\ssdt_integrity.c" />
+    <ClCompile Include="src\dxgk_guard.c" />
   </ItemGroup>
   <ItemGroup>
     <MASM Include="src\ac_asm.asm" />
@@ -175,8 +177,11 @@
     <ClInclude Include="src\imports_hash.h" />
     <ClInclude Include="src\handler_gate.h" />
     <ClInclude Include="src\ac_asm.h" />
+    <ClInclude Include="src\ac_anchor.h" />
     <ClInclude Include="src\hv_probe.h" />
     <ClInclude Include="src\hwid_history.h" />
+    <ClInclude Include="src\ssdt_integrity.h" />
+    <ClInclude Include="src\dxgk_guard.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

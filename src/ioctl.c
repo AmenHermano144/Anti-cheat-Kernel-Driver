@@ -14,6 +14,7 @@
 #include "iommu_require.h"
 #include "tpm_attest.h"
 #include "handler_gate.h"
+#include "ac_anchor.h"
 
 typedef enum _AC_OP
 {
@@ -394,6 +395,29 @@ static NTSTATUS HandleMux(PVOID buf, ULONG inLen, ULONG outLen, ULONG *written)
 {
     *written = 0;
     if (!buf || inLen < sizeof(AC_MUX_INPUT_HEADER)) return STATUS_INVALID_PARAMETER;
+
+    // readiness gate: refuse post-handshake traffic until every baseline
+    // module is armed. the xor-pair returns false whenever one or both
+    // halves have been reset — tamper that zeros the flag locks the mux
+    // automatically instead of silently serving stale data.
+    if (!AcTamperIsInitComplete())
+    {
+        AcTamperOnViolation(AC_TAMPER_REASON_READINESS, buf);
+        return CORE_AC_STATUS_NO_SESSION;
+    }
+
+    // caller-rip anchor. _ReturnAddress() here is our own CoreIoctlDispatch
+    // return site, which must land inside our image. the inlining guarantee
+    // is firm with /O2 + __forceinline on the accessor, and even without
+    // inlining the return site is still the dispatcher's own frame, which
+    // is still inside our image. a transplanted dispatcher that executed
+    // us from a relocated copy would fail this check.
+    if (!AcAnchorCheckCallerRip())
+    {
+        AcTamperOnViolation(AC_TAMPER_REASON_ANCHOR, _ReturnAddress());
+        return CORE_AC_STATUS_TAMPER;
+    }
+
     if (!InterlockedCompareExchange(&g_Core.SessionActive, 0, 0)) return CORE_AC_STATUS_NO_SESSION;
 
     AC_MUX_INPUT_HEADER hdr;

@@ -103,31 +103,106 @@ typedef NTSTATUS (NTAPI *PFN_ZwQueryValueKey)(
     ULONG                        Length,
     PULONG                       ResultLength);
 
-extern PFN_ZwQuerySystemInformation           AcZwQuerySystemInformation;
-extern PFN_ObReferenceObjectByName            AcObReferenceObjectByName;
-extern PFN_PsSetCreateProcessNotifyRoutineEx  AcPsSetCreateProcessNotifyRoutineEx;
-extern PFN_PsSetLoadImageNotifyRoutine        AcPsSetLoadImageNotifyRoutine;
-extern PFN_PsRemoveLoadImageNotifyRoutine     AcPsRemoveLoadImageNotifyRoutine;
-extern PFN_PsSetLoadImageNotifyRoutineEx      AcPsSetLoadImageNotifyRoutineEx;
+// descriptor-based import resolution. the flat pointer table we used to ship
+// had every AcXxx = resolved_addr sitting in .data, where any scanner that
+// knew what to look for would find our full list instantly. the vanguard vgk
+// 1.19.2 writeup documented their current layout — a 240-row table of
+// { byte index, qword xor_key, qword encoded_ptr } rewritten at every boot;
+// a static .data scan after the fact never recovers the live pointers. this
+// port keeps the interface identical (AcMmCopyMemory(...) still looks like a
+// function pointer call at every call site) but moves the storage to the
+// same shape: one 24-byte descriptor per api with a per-entry xor key, and a
+// single accessor that xors on demand right before the indirect call.
+typedef struct _AC_IMPORT_DESC
+{
+    ULONG64 EncodedPtr;
+    ULONG64 XorKey;
+    ULONG64 Reserved;
+} AC_IMPORT_DESC, *PAC_IMPORT_DESC;
 
-extern PFN_PsLookupProcessByProcessId         AcPsLookupProcessByProcessId;
-extern PFN_PsLookupThreadByThreadId           AcPsLookupThreadByThreadId;
-extern PFN_PsGetProcessWow64Process           AcPsGetProcessWow64Process;
-extern PFN_PsGetProcessImageFileName          AcPsGetProcessImageFileName;
-extern PFN_PsGetProcessId                     AcPsGetProcessId;
-extern PFN_PsGetProcessPeb                    AcPsGetProcessPeb;
+typedef enum _AC_IMPORT_IDX
+{
+    AC_IMP_ZwQuerySystemInformation          = 0,
+    AC_IMP_ObReferenceObjectByName           = 1,
+    AC_IMP_PsSetCreateProcessNotifyRoutineEx = 2,
+    AC_IMP_PsSetLoadImageNotifyRoutine       = 3,
+    AC_IMP_PsRemoveLoadImageNotifyRoutine    = 4,
+    AC_IMP_PsSetLoadImageNotifyRoutineEx     = 5,
 
-extern PFN_ObReferenceObjectByHandle          AcObReferenceObjectByHandle;
-extern PFN_MmCopyMemory                       AcMmCopyMemory;
-extern PFN_PsCreateSystemThread               AcPsCreateSystemThread;
+    AC_IMP_PsLookupProcessByProcessId        = 6,
+    AC_IMP_PsLookupThreadByThreadId          = 7,
+    AC_IMP_PsGetProcessWow64Process          = 8,
+    AC_IMP_PsGetProcessImageFileName         = 9,
+    AC_IMP_PsGetProcessId                    = 10,
+    AC_IMP_PsGetProcessPeb                   = 11,
 
-extern PFN_KeRegisterNmiCallback              AcKeRegisterNmiCallback;
-extern PFN_KeDeregisterNmiCallback            AcKeDeregisterNmiCallback;
-extern PFN_HalSendNMI                         AcHalSendNMI;
+    AC_IMP_ObReferenceObjectByHandle         = 12,
+    AC_IMP_MmCopyMemory                      = 13,
+    AC_IMP_PsCreateSystemThread              = 14,
 
-extern PFN_ZwOpenKey                          AcZwOpenKey;
-extern PFN_ZwCreateKey                        AcZwCreateKey;
-extern PFN_ZwSetValueKey                      AcZwSetValueKey;
-extern PFN_ZwQueryValueKey                    AcZwQueryValueKey;
+    AC_IMP_KeRegisterNmiCallback             = 15,
+    AC_IMP_KeDeregisterNmiCallback           = 16,
+    AC_IMP_HalSendNMI                        = 17,
+
+    AC_IMP_ZwOpenKey                         = 18,
+    AC_IMP_ZwCreateKey                       = 19,
+    AC_IMP_ZwSetValueKey                     = 20,
+    AC_IMP_ZwQueryValueKey                   = 21,
+
+    AC_IMP_COUNT                             = 22
+} AC_IMPORT_IDX;
+
+extern AC_IMPORT_DESC g_AcImports[AC_IMP_COUNT];
+
+// thunk lives in ac_asm.asm. forwarding through an external call keeps the
+// xor-decode sequence in one .text location instead of being inlined into
+// every caller — a scanner that learns the shape in one spot still can't
+// find the next one because there isn't one. the per-call overhead vs. the
+// previous __forceinline is one call + one ret, dwarfed by anything a
+// resolved api actually does.
+#ifdef __cplusplus
+extern "C" ULONG64 AcResolveImportA(ULONG idx);
+#else
+ULONG64 AcResolveImportA(ULONG idx);
+#endif
+
+__forceinline PVOID AcResolveImport(ULONG idx)
+{
+    return (PVOID)AcResolveImportA(idx);
+}
+
+#define AcZwQuerySystemInformation          ((PFN_ZwQuerySystemInformation)         AcResolveImport(AC_IMP_ZwQuerySystemInformation))
+#define AcObReferenceObjectByName           ((PFN_ObReferenceObjectByName)          AcResolveImport(AC_IMP_ObReferenceObjectByName))
+#define AcPsSetCreateProcessNotifyRoutineEx ((PFN_PsSetCreateProcessNotifyRoutineEx)AcResolveImport(AC_IMP_PsSetCreateProcessNotifyRoutineEx))
+#define AcPsSetLoadImageNotifyRoutine       ((PFN_PsSetLoadImageNotifyRoutine)      AcResolveImport(AC_IMP_PsSetLoadImageNotifyRoutine))
+#define AcPsRemoveLoadImageNotifyRoutine    ((PFN_PsRemoveLoadImageNotifyRoutine)   AcResolveImport(AC_IMP_PsRemoveLoadImageNotifyRoutine))
+#define AcPsSetLoadImageNotifyRoutineEx     ((PFN_PsSetLoadImageNotifyRoutineEx)    AcResolveImport(AC_IMP_PsSetLoadImageNotifyRoutineEx))
+
+#define AcPsLookupProcessByProcessId        ((PFN_PsLookupProcessByProcessId)       AcResolveImport(AC_IMP_PsLookupProcessByProcessId))
+#define AcPsLookupThreadByThreadId          ((PFN_PsLookupThreadByThreadId)         AcResolveImport(AC_IMP_PsLookupThreadByThreadId))
+#define AcPsGetProcessWow64Process          ((PFN_PsGetProcessWow64Process)         AcResolveImport(AC_IMP_PsGetProcessWow64Process))
+#define AcPsGetProcessImageFileName         ((PFN_PsGetProcessImageFileName)        AcResolveImport(AC_IMP_PsGetProcessImageFileName))
+#define AcPsGetProcessId                    ((PFN_PsGetProcessId)                   AcResolveImport(AC_IMP_PsGetProcessId))
+#define AcPsGetProcessPeb                   ((PFN_PsGetProcessPeb)                  AcResolveImport(AC_IMP_PsGetProcessPeb))
+
+#define AcObReferenceObjectByHandle         ((PFN_ObReferenceObjectByHandle)        AcResolveImport(AC_IMP_ObReferenceObjectByHandle))
+#define AcMmCopyMemory                      ((PFN_MmCopyMemory)                     AcResolveImport(AC_IMP_MmCopyMemory))
+#define AcPsCreateSystemThread              ((PFN_PsCreateSystemThread)             AcResolveImport(AC_IMP_PsCreateSystemThread))
+
+#define AcKeRegisterNmiCallback             ((PFN_KeRegisterNmiCallback)            AcResolveImport(AC_IMP_KeRegisterNmiCallback))
+#define AcKeDeregisterNmiCallback           ((PFN_KeDeregisterNmiCallback)          AcResolveImport(AC_IMP_KeDeregisterNmiCallback))
+#define AcHalSendNMI                        ((PFN_HalSendNMI)                       AcResolveImport(AC_IMP_HalSendNMI))
+
+#define AcZwOpenKey                         ((PFN_ZwOpenKey)                        AcResolveImport(AC_IMP_ZwOpenKey))
+#define AcZwCreateKey                       ((PFN_ZwCreateKey)                      AcResolveImport(AC_IMP_ZwCreateKey))
+#define AcZwSetValueKey                     ((PFN_ZwSetValueKey)                    AcResolveImport(AC_IMP_ZwSetValueKey))
+#define AcZwQueryValueKey                   ((PFN_ZwQueryValueKey)                  AcResolveImport(AC_IMP_ZwQueryValueKey))
 
 NTSTATUS AcImportsResolve(PDRIVER_OBJECT DriverObject);
+
+// gives ssdt_integrity a way to fetch the live ntoskrnl base without
+// re-walking the module list on every heartbeat.
+PVOID    AcImportsGetNtBase(VOID);
+ULONG    AcImportsGetNtSize(VOID);
+PVOID    AcImportsResolveNtExportByHash(ULONG64 nameHash);
+NTSTATUS AcImportsFindModule(ULONG64 nameHash, PVOID *outBase, ULONG *outSize);

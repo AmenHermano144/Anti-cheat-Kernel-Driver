@@ -6,6 +6,10 @@ VOID     AcTamperInitBootCookie(VOID);
 NTSTATUS AcTamperArm(VOID);
 VOID     AcTamperDisarm(VOID);
 
+VOID     AcTamperSetInitComplete(VOID);
+VOID     AcTamperClearInitComplete(VOID);
+BOOLEAN  AcTamperIsInitComplete(VOID);
+
 BOOLEAN  AcTamperCheckLstar(VOID);
 BOOLEAN  AcTamperCheckLstarFromNmi(VOID);
 BOOLEAN  AcTamperCheckStackCookie(VOID);
@@ -38,3 +42,7 @@ BOOLEAN  AcTamperDrainNmiFlags(ULONG *outReason, ULONG64 *outObserved);
 #define AC_TAMPER_REASON_TPM_ATTEST      0x1014
 #define AC_TAMPER_REASON_SUS_THREAD      0x1015
 #define AC_TAMPER_REASON_VHD_MOUNT       0x1016
+#define AC_TAMPER_REASON_SSDT            0x1017
+#define AC_TAMPER_REASON_ANCHOR          0x1018
+#define AC_TAMPER_REASON_READINESS       0x1019
+#define AC_TAMPER_REASON_DXGK            0x101A

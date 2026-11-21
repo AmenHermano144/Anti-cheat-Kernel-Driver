@@ -32,6 +32,9 @@
 #include "vhd_detect.h"
 #include "handler_gate.h"
 #include "ac_asm.h"
+#include "ac_anchor.h"
+#include "ssdt_integrity.h"
+#include "dxgk_guard.h"
 #include "hv_probe.h"
 
 CORE_AC_GLOBAL g_Core;
@@ -57,6 +60,17 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     g_Core.DriverObject = DriverObject;
 
     AcTamperInitBootCookie();
+
+    // anchor must come before the first ioctl is ever dispatched so the
+    // caller-RIP check has bounds to compare against. without bounds the
+    // check short-circuits to "ok", which is still safe — but if we armed
+    // anchor after import resolve we'd miss the dispatcher window.
+    status = AcAnchorInit(DriverObject);
+    if (!NT_SUCCESS(status))
+    {
+        CORE_LOG("AnchorInit failed: 0x%08X", status);
+        return status;
+    }
 
     status = AcImportsResolve(DriverObject);
     if (!NT_SUCCESS(status))
@@ -190,8 +204,26 @@ static VOID CoreDeferredInit(PVOID Context)
 
     (VOID)HvProbeInit();
 
+    // ssdt baseline needs the page walker alive (it runs its own PwInit but
+    // image_backing already initialized it a few steps back) and needs
+    // imports resolved so the hot nt* exports can be looked up.
+    (VOID)SsdtIntegrityInit();
+    (VOID)SsdtIntegrityBaseline();
+
+    // dxgk baseline is lazy — dxgkrnl is usually not resident yet at this
+    // point. init stores the name hash; baseline retries from the
+    // heartbeat until the display stack comes up.
+    (VOID)DxgkGuardInit();
+    (VOID)DxgkGuardBaseline();
+
     status = CoreStartWorker();
     if (!NT_SUCCESS(status)) { CORE_LOG("StartWorker failed: 0x%08X", status); goto fail; }
+
+    // every baseline is armed. flip the readiness xor-pair so HandleMux
+    // stops rejecting post-handshake operations. kept last on purpose —
+    // if StartWorker failed we never arm readiness, and the ioctl surface
+    // stays in the pre-init tar-pit until shutdown.
+    AcTamperSetInitComplete();
 
     InterlockedExchange(&g_Core.InitState, 2);
     CORE_LOG("Core_ac ready");
@@ -439,6 +471,8 @@ static VOID CorePollWorker(PVOID Context)
             if (HandlerGateAllowed(AC_H_SUSTHREADS)) (VOID)SusThreadsVerify();
             if (HandlerGateAllowed(AC_H_VHD))        (VOID)VhdDetectVerify();
             if (HandlerGateAllowed(AC_H_ENV))        (VOID)HvProbeVerify();
+            if (HandlerGateAllowed(AC_H_SSDT))       (VOID)SsdtIntegrityVerify();
+            if (HandlerGateAllowed(AC_H_DXGK))       (VOID)DxgkGuardVerify();
             (VOID)ChannelFlushPending();
         }
 
@@ -453,6 +487,7 @@ static VOID CorePollWorker(PVOID Context)
 VOID CoreDriverUnload(PDRIVER_OBJECT DriverObject)
 {
     UNREFERENCED_PARAMETER(DriverObject);
+    AcTamperClearInitComplete();
     InterlockedExchange(&g_Core.InitState, 3);
     InterlockedExchange(&g_Core.StopRequested, 1);
 
@@ -473,6 +508,8 @@ VOID CoreDriverUnload(PDRIVER_OBJECT DriverObject)
     CoreUnregisterCallbacks();
     HookAuditUnregisterCallbacks();
     AcTamperDisarm();
+    DxgkGuardShutdown();
+    SsdtIntegrityShutdown();
     VhdDetectShutdown();
     SusThreadsShutdown();
     TpmAttestShutdown();

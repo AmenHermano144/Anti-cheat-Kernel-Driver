@@ -1,32 +1,10 @@
 #include "imports_hash.h"
 #include "core.h"
 
-PFN_ZwQuerySystemInformation           AcZwQuerySystemInformation           = NULL;
-PFN_ObReferenceObjectByName            AcObReferenceObjectByName            = NULL;
-PFN_PsSetCreateProcessNotifyRoutineEx  AcPsSetCreateProcessNotifyRoutineEx  = NULL;
-PFN_PsSetLoadImageNotifyRoutine        AcPsSetLoadImageNotifyRoutine        = NULL;
-PFN_PsRemoveLoadImageNotifyRoutine     AcPsRemoveLoadImageNotifyRoutine     = NULL;
-PFN_PsSetLoadImageNotifyRoutineEx      AcPsSetLoadImageNotifyRoutineEx      = NULL;
+AC_IMPORT_DESC g_AcImports[AC_IMP_COUNT] = { 0 };
 
-PFN_PsLookupProcessByProcessId         AcPsLookupProcessByProcessId         = NULL;
-PFN_PsLookupThreadByThreadId           AcPsLookupThreadByThreadId           = NULL;
-PFN_PsGetProcessWow64Process           AcPsGetProcessWow64Process           = NULL;
-PFN_PsGetProcessImageFileName          AcPsGetProcessImageFileName          = NULL;
-PFN_PsGetProcessId                     AcPsGetProcessId                     = NULL;
-PFN_PsGetProcessPeb                    AcPsGetProcessPeb                    = NULL;
-
-PFN_ObReferenceObjectByHandle          AcObReferenceObjectByHandle          = NULL;
-PFN_MmCopyMemory                       AcMmCopyMemory                       = NULL;
-PFN_PsCreateSystemThread               AcPsCreateSystemThread               = NULL;
-
-PFN_KeRegisterNmiCallback              AcKeRegisterNmiCallback              = NULL;
-PFN_KeDeregisterNmiCallback            AcKeDeregisterNmiCallback            = NULL;
-PFN_HalSendNMI                         AcHalSendNMI                         = NULL;
-
-PFN_ZwOpenKey                          AcZwOpenKey                          = NULL;
-PFN_ZwCreateKey                        AcZwCreateKey                        = NULL;
-PFN_ZwSetValueKey                      AcZwSetValueKey                      = NULL;
-PFN_ZwQueryValueKey                    AcZwQueryValueKey                    = NULL;
+static PVOID g_NtBase = NULL;
+static ULONG g_NtSize = 0;
 
 #define FNV64_OFFSET  0xCBF29CE484222325ULL
 #define FNV64_PRIME   0x100000001B3ULL
@@ -129,6 +107,35 @@ static PVOID FindModuleBase(PDRIVER_OBJECT drv, ULONG64 nameHash)
     return NULL;
 }
 
+static ULONG FindModuleSize(PDRIVER_OBJECT drv, ULONG64 nameHash)
+{
+    if (!drv || !drv->DriverSection) return 0;
+
+    PCORE_KLDR_ENTRY self = (PCORE_KLDR_ENTRY)drv->DriverSection;
+    PLIST_ENTRY cursor = self->InLoadOrderLinks.Flink;
+    ULONG guard = 0;
+
+    __try
+    {
+        while (cursor && cursor != &self->InLoadOrderLinks && guard++ < 1024)
+        {
+            PCORE_KLDR_ENTRY e = CONTAINING_RECORD(cursor, CORE_KLDR_ENTRY, InLoadOrderLinks);
+            if (e->BaseDllName.Buffer && e->BaseDllName.Length > 0 && e->DllBase)
+            {
+                ULONG64 h = FnvUnicodeI(e->BaseDllName.Buffer, e->BaseDllName.Length);
+                if (h == nameHash) return e->SizeOfImage;
+            }
+            cursor = cursor->Flink;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return 0;
+    }
+
+    return 0;
+}
+
 static PVOID FindExport(PVOID imgBase, ULONG64 nameHash)
 {
     if (!imgBase) return NULL;
@@ -173,65 +180,108 @@ static PVOID FindExport(PVOID imgBase, ULONG64 nameHash)
     return NULL;
 }
 
+static ULONG64 DeriveXorKey(ULONG idx, ULONG64 nameHash)
+{
+    // per-descriptor key: mix the slot index, the name hash and the boot
+    // cookie so two boots of the same build produce two completely different
+    // encoded_ptr tables. the rolling_key nibble lives at the low 8 bits so
+    // a byte-wise scanner that learned "+0x08 of a 24-byte row" from one
+    // boot gets nothing from the next.
+    ULONG64 key = CoreBootCookie();
+    key ^= nameHash;
+    key ^= ((ULONG64)idx * 0x9E3779B97F4A7C15ULL);
+    key ^= ((ULONG64)__rdtsc() & 0xFFFFFFFFULL);
+    return key;
+}
+
+static VOID InstallImport(ULONG idx, PVOID target, ULONG64 nameHash)
+{
+    ULONG64 key = DeriveXorKey(idx, nameHash);
+    g_AcImports[idx].XorKey     = key;
+    g_AcImports[idx].EncodedPtr = ((ULONG64)(ULONG_PTR)target) ^ key;
+    g_AcImports[idx].Reserved   = CoreBootCookie() ^ (ULONG64)idx;
+}
+
+PVOID AcImportsGetNtBase(VOID) { return g_NtBase; }
+ULONG AcImportsGetNtSize(VOID) { return g_NtSize; }
+
+PVOID AcImportsResolveNtExportByHash(ULONG64 nameHash)
+{
+    return g_NtBase ? FindExport(g_NtBase, nameHash) : NULL;
+}
+
+NTSTATUS AcImportsFindModule(ULONG64 nameHash, PVOID *outBase, ULONG *outSize)
+{
+    if (outBase) *outBase = NULL;
+    if (outSize) *outSize = 0;
+
+    PDRIVER_OBJECT drv = g_Core.DriverObject;
+    if (!drv) return STATUS_NOT_FOUND;
+
+    PVOID base = FindModuleBase(drv, nameHash);
+    if (!base) return STATUS_NOT_FOUND;
+
+    ULONG sz = FindModuleSize(drv, nameHash);
+    if (outBase) *outBase = base;
+    if (outSize) *outSize = sz;
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS AcImportsResolve(PDRIVER_OBJECT DriverObject)
 {
     PVOID ntBase  = FindModuleBase(DriverObject, AC_HASH_NTOSKRNL);
     PVOID halBase = FindModuleBase(DriverObject, AC_HASH_HAL);
     if (!ntBase) return STATUS_NOT_FOUND;
 
-    AcZwQuerySystemInformation =
-        (PFN_ZwQuerySystemInformation)FindExport(ntBase, AC_HASH_ZwQuerySystemInformation);
-    AcObReferenceObjectByName =
-        (PFN_ObReferenceObjectByName)FindExport(ntBase, AC_HASH_ObReferenceObjectByName);
-    AcPsSetCreateProcessNotifyRoutineEx =
-        (PFN_PsSetCreateProcessNotifyRoutineEx)FindExport(ntBase, AC_HASH_PsSetCreateProcessNotifyRoutineEx);
-    AcPsSetLoadImageNotifyRoutine =
-        (PFN_PsSetLoadImageNotifyRoutine)FindExport(ntBase, AC_HASH_PsSetLoadImageNotifyRoutine);
-    AcPsRemoveLoadImageNotifyRoutine =
-        (PFN_PsRemoveLoadImageNotifyRoutine)FindExport(ntBase, AC_HASH_PsRemoveLoadImageNotifyRoutine);
-    AcPsSetLoadImageNotifyRoutineEx =
-        (PFN_PsSetLoadImageNotifyRoutineEx)FindExport(ntBase, AC_HASH_PsSetLoadImageNotifyRoutineEx);
+    g_NtBase = ntBase;
+    g_NtSize = FindModuleSize(DriverObject, AC_HASH_NTOSKRNL);
 
-    AcPsLookupProcessByProcessId =
-        (PFN_PsLookupProcessByProcessId)FindExport(ntBase, AC_HASH_PsLookupProcessByProcessId);
-    AcPsLookupThreadByThreadId =
-        (PFN_PsLookupThreadByThreadId)FindExport(ntBase, AC_HASH_PsLookupThreadByThreadId);
-    AcPsGetProcessWow64Process =
-        (PFN_PsGetProcessWow64Process)FindExport(ntBase, AC_HASH_PsGetProcessWow64Process);
-    AcPsGetProcessImageFileName =
-        (PFN_PsGetProcessImageFileName)FindExport(ntBase, AC_HASH_PsGetProcessImageFileName);
-    AcPsGetProcessId =
-        (PFN_PsGetProcessId)FindExport(ntBase, AC_HASH_PsGetProcessId);
-    AcPsGetProcessPeb =
-        (PFN_PsGetProcessPeb)FindExport(ntBase, AC_HASH_PsGetProcessPeb);
+    struct _ENTRY { ULONG idx; ULONG64 hash; PVOID base; } table[] =
+    {
+        { AC_IMP_ZwQuerySystemInformation,           AC_HASH_ZwQuerySystemInformation,           ntBase },
+        { AC_IMP_ObReferenceObjectByName,            AC_HASH_ObReferenceObjectByName,            ntBase },
+        { AC_IMP_PsSetCreateProcessNotifyRoutineEx,  AC_HASH_PsSetCreateProcessNotifyRoutineEx,  ntBase },
+        { AC_IMP_PsSetLoadImageNotifyRoutine,        AC_HASH_PsSetLoadImageNotifyRoutine,        ntBase },
+        { AC_IMP_PsRemoveLoadImageNotifyRoutine,     AC_HASH_PsRemoveLoadImageNotifyRoutine,     ntBase },
+        { AC_IMP_PsSetLoadImageNotifyRoutineEx,      AC_HASH_PsSetLoadImageNotifyRoutineEx,      ntBase },
 
-    AcObReferenceObjectByHandle =
-        (PFN_ObReferenceObjectByHandle)FindExport(ntBase, AC_HASH_ObReferenceObjectByHandle);
-    AcMmCopyMemory =
-        (PFN_MmCopyMemory)FindExport(ntBase, AC_HASH_MmCopyMemory);
-    AcPsCreateSystemThread =
-        (PFN_PsCreateSystemThread)FindExport(ntBase, AC_HASH_PsCreateSystemThread);
+        { AC_IMP_PsLookupProcessByProcessId,         AC_HASH_PsLookupProcessByProcessId,         ntBase },
+        { AC_IMP_PsLookupThreadByThreadId,           AC_HASH_PsLookupThreadByThreadId,           ntBase },
+        { AC_IMP_PsGetProcessWow64Process,           AC_HASH_PsGetProcessWow64Process,           ntBase },
+        { AC_IMP_PsGetProcessImageFileName,          AC_HASH_PsGetProcessImageFileName,          ntBase },
+        { AC_IMP_PsGetProcessId,                     AC_HASH_PsGetProcessId,                     ntBase },
+        { AC_IMP_PsGetProcessPeb,                    AC_HASH_PsGetProcessPeb,                    ntBase },
 
-    AcKeRegisterNmiCallback =
-        (PFN_KeRegisterNmiCallback)FindExport(ntBase, AC_HASH_KeRegisterNmiCallback);
-    AcKeDeregisterNmiCallback =
-        (PFN_KeDeregisterNmiCallback)FindExport(ntBase, AC_HASH_KeDeregisterNmiCallback);
+        { AC_IMP_ObReferenceObjectByHandle,          AC_HASH_ObReferenceObjectByHandle,          ntBase },
+        { AC_IMP_MmCopyMemory,                       AC_HASH_MmCopyMemory,                       ntBase },
+        { AC_IMP_PsCreateSystemThread,               AC_HASH_PsCreateSystemThread,               ntBase },
 
-    if (halBase)
-        AcHalSendNMI = (PFN_HalSendNMI)FindExport(halBase, AC_HASH_HalSendNMI);
-    if (!AcHalSendNMI)
-        AcHalSendNMI = (PFN_HalSendNMI)FindExport(ntBase, AC_HASH_HalSendNMI);
+        { AC_IMP_KeRegisterNmiCallback,              AC_HASH_KeRegisterNmiCallback,              ntBase },
+        { AC_IMP_KeDeregisterNmiCallback,            AC_HASH_KeDeregisterNmiCallback,            ntBase },
 
-    AcZwOpenKey       = (PFN_ZwOpenKey)      FindExport(ntBase, AC_HASH_ZwOpenKey);
-    AcZwCreateKey     = (PFN_ZwCreateKey)    FindExport(ntBase, AC_HASH_ZwCreateKey);
-    AcZwSetValueKey   = (PFN_ZwSetValueKey)  FindExport(ntBase, AC_HASH_ZwSetValueKey);
-    AcZwQueryValueKey = (PFN_ZwQueryValueKey)FindExport(ntBase, AC_HASH_ZwQueryValueKey);
+        { AC_IMP_ZwOpenKey,                          AC_HASH_ZwOpenKey,                          ntBase },
+        { AC_IMP_ZwCreateKey,                        AC_HASH_ZwCreateKey,                        ntBase },
+        { AC_IMP_ZwSetValueKey,                      AC_HASH_ZwSetValueKey,                      ntBase },
+        { AC_IMP_ZwQueryValueKey,                    AC_HASH_ZwQueryValueKey,                    ntBase },
+    };
 
-    if (!AcZwQuerySystemInformation)          return STATUS_NOT_FOUND;
-    if (!AcObReferenceObjectByName)           return STATUS_NOT_FOUND;
-    if (!AcPsSetCreateProcessNotifyRoutineEx) return STATUS_NOT_FOUND;
-    if (!AcPsSetLoadImageNotifyRoutine)       return STATUS_NOT_FOUND;
-    if (!AcPsRemoveLoadImageNotifyRoutine)    return STATUS_NOT_FOUND;
+    for (ULONG i = 0; i < ARRAYSIZE(table); i++)
+    {
+        PVOID p = FindExport(table[i].base, table[i].hash);
+        InstallImport(table[i].idx, p, table[i].hash);
+    }
+
+    // HalSendNMI may live in either hal or ntoskrnl depending on the build.
+    PVOID halNmi = NULL;
+    if (halBase) halNmi = FindExport(halBase, AC_HASH_HalSendNMI);
+    if (!halNmi) halNmi = FindExport(ntBase, AC_HASH_HalSendNMI);
+    InstallImport(AC_IMP_HalSendNMI, halNmi, AC_HASH_HalSendNMI);
+
+    if (AcResolveImport(AC_IMP_ZwQuerySystemInformation) == NULL)          return STATUS_NOT_FOUND;
+    if (AcResolveImport(AC_IMP_ObReferenceObjectByName) == NULL)           return STATUS_NOT_FOUND;
+    if (AcResolveImport(AC_IMP_PsSetCreateProcessNotifyRoutineEx) == NULL) return STATUS_NOT_FOUND;
+    if (AcResolveImport(AC_IMP_PsSetLoadImageNotifyRoutine) == NULL)       return STATUS_NOT_FOUND;
+    if (AcResolveImport(AC_IMP_PsRemoveLoadImageNotifyRoutine) == NULL)    return STATUS_NOT_FOUND;
 
     return STATUS_SUCCESS;
 }

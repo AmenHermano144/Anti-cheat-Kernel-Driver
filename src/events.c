@@ -303,3 +303,17 @@ NTSTATUS EventsReportVhdMount(const WIRE_VHD_MOUNT *rec)
     if (!rec) return STATUS_INVALID_PARAMETER;
     return ChannelEnqueueRecord(WIRE_REC_VHD_MOUNT, rec, sizeof(*rec));
 }
+
+NTSTATUS EventsReportSsdtHook(const WIRE_SSDT_HOOK *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_SSDT_HOOK, rec, sizeof(*rec));
+}
+
+NTSTATUS EventsReportDxgkHook(const WIRE_DXGK_HOOK *rec)
+{
+    if (!InterlockedCompareExchange(&g_EventsReady, 0, 0)) return STATUS_DEVICE_NOT_READY;
+    if (!rec) return STATUS_INVALID_PARAMETER;
+    return ChannelEnqueueRecord(WIRE_REC_DXGK_HOOK, rec, sizeof(*rec));
+}

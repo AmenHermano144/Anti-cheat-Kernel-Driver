@@ -40,3 +40,5 @@ Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\handler_gate.c;Z:\!NIMRODCOR
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\ac_anchor.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\ac_anchor.obj
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\hv_probe.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\hv_probe.obj
 Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\hwid_history.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\hwid_history.obj
+Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\ssdt_integrity.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\ssdt_integrity.obj
+Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\src\dxgk_guard.c;Z:\!NIMRODCORE\DRIVERS\SOURCES\faceit\Ac_driver\build\obj\Release\dxgk_guard.obj

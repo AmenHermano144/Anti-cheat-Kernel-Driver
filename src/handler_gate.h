@@ -32,6 +32,8 @@ typedef enum _AC_HANDLER_ID
     AC_H_TAMPER        = 0x19,
     AC_H_ENV           = 0x1A,
     AC_H_SIGNATURES    = 0x1B,
+    AC_H_SSDT          = 0x1C,
+    AC_H_DXGK          = 0x1D,
 
     AC_HANDLER_COUNT   = 0x40,
 } AC_HANDLER_ID;

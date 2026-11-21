@@ -44,6 +44,8 @@
 #define WIRE_REC_HV_TIMING      0x65
 #define WIRE_REC_HWID_HISTORY   0x66
 #define WIRE_REC_TRUST_SIGNAL   0x67
+#define WIRE_REC_SSDT_HOOK      0x68
+#define WIRE_REC_DXGK_HOOK      0x69
 #define WIRE_REC_TEARDOWN       0x02
 
 #define MP_VERDICT_WAITING      0
@@ -527,4 +529,74 @@ typedef struct _WIRE_TPM_ATTEST_REPORT
     UCHAR   BundleSha256[32];
     CHAR    VendorString[8];
 } WIRE_TPM_ATTEST_REPORT, *PWIRE_TPM_ATTEST_REPORT;
+
+#define SSDT_HOOK_FLAG_SYSCALL_DRIFT        0x00000001
+#define SSDT_HOOK_FLAG_EXPORT_DRIFT         0x00000002
+#define SSDT_HOOK_FLAG_READ_FAILED          0x00000004
+#define SSDT_HOOK_FLAG_LSTAR_SHIFTED        0x00000008
+#define SSDT_HOOK_FLAG_JMP_PROLOGUE         0x00000010
+#define SSDT_HOOK_FLAG_UNBACKED_TARGET      0x00000020
+#define SSDT_HOOK_FLAG_KSDT_DRIFT           0x00000040
+#define SSDT_HOOK_FLAG_SERVICETABLE_DRIFT   0x00000080
+#define SSDT_HOOK_FLAG_KSDT_NOT_FOUND       0x00000100
+#define SSDT_HOOK_FLAG_SERVICETABLE_UNSANE  0x00000200
+
+#define SSDT_TARGET_LSTAR               0
+#define SSDT_TARGET_NT_EXPORT           1
+
+#define SSDT_HOOK_MAX_EXPORTS           10
+#define SSDT_HOOK_PROLOGUE_BYTES        128
+#define SSDT_HOOK_LSTAR_BYTES           512
+
+typedef struct _WIRE_SSDT_EXPORT_ENTRY
+{
+    ULONG64 ApiVa;
+    ULONG64 NameHash;
+    ULONG   Flags;
+    ULONG   Reserved;
+    UCHAR   BaselineHash[32];
+    UCHAR   ObservedHash[32];
+    UCHAR   ObservedFirstBytes[32];
+} WIRE_SSDT_EXPORT_ENTRY, *PWIRE_SSDT_EXPORT_ENTRY;
+
+typedef struct _WIRE_SSDT_HOOK
+{
+    ULONG64 KiSystemCall64Va;
+    ULONG64 LstarValue;
+    ULONG64 NtoskrnlBase;
+    ULONG   Flags;
+    ULONG   ExportCount;
+    UCHAR   LstarBaselineHash[32];
+    UCHAR   LstarObservedHash[32];
+    UCHAR   LstarObservedFirstBytes[32];
+    ULONG64 KeServiceDescriptorTableVa;
+    ULONG64 ServiceTableVa;
+    ULONG   ServiceTableSize;
+    ULONG   Reserved1;
+    UCHAR   KsdtBaselineHash[32];
+    UCHAR   KsdtObservedHash[32];
+    UCHAR   SvcTableBaselineHash[32];
+    UCHAR   SvcTableObservedHash[32];
+    WIRE_SSDT_EXPORT_ENTRY Exports[SSDT_HOOK_MAX_EXPORTS];
+} WIRE_SSDT_HOOK, *PWIRE_SSDT_HOOK;
+
+#define DXGK_HOOK_FLAG_BULK_DRIFT       0x00000001
+#define DXGK_HOOK_FLAG_READ_FAILED      0x00000002
+#define DXGK_HOOK_FLAG_NOT_LOADED       0x00000004
+#define DXGK_HOOK_FLAG_RWX_PRESENT      0x00000008
+#define DXGK_HOOK_FLAG_JMP_ENTRY        0x00000010
+#define DXGK_HOOK_FLAG_MODULE_SHIFTED   0x00000020
+
+#define DXGK_BULK_HASH_BYTES            0x8000
+
+typedef struct _WIRE_DXGK_HOOK
+{
+    ULONG64 DxgkBase;
+    ULONG   DxgkSize;
+    ULONG   Flags;
+    ULONG64 EntryPointVa;
+    UCHAR   BulkBaselineHash[32];
+    UCHAR   BulkObservedHash[32];
+    UCHAR   EntryObservedBytes[32];
+} WIRE_DXGK_HOOK, *PWIRE_DXGK_HOOK;
 #pragma pack(pop)

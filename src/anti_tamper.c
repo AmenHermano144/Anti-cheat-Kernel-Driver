@@ -26,6 +26,35 @@ VOID AcTamperInitBootCookie(VOID)
 
     g_StackCookieRef[0] = tsc ^ 0xA5A5A5A5A5A5A5A5ULL;
     g_StackCookieRef[1] = ~g_StackCookieRef[0];
+
+    // readiness flag starts zero/XOR-paired so AcTamperIsInitComplete() returns FALSE
+    // until CoreDeferredInit() decides every baseline module is armed.
+    g_Core.InitReadyFlag[0] = 0;
+    g_Core.InitReadyFlag[1] = 0;
+}
+
+VOID AcTamperSetInitComplete(VOID)
+{
+    // the XOR pair must satisfy a ^ b == AC_INIT_READY_MAGIC. mix in the boot
+    // cookie so a static scanner that spots AC_INIT_READY_MAGIC still cannot
+    // pattern the stored halves without knowing the per-boot cookie.
+    ULONG64 magic = 0xD15EA5EDBADC0FFEULL ^ CoreBootCookie();
+    ULONG64 lo    = __rdtsc() ^ 0x5A17C001B16DEADULL;
+    g_Core.InitReadyFlag[0] = lo;
+    g_Core.InitReadyFlag[1] = lo ^ magic;
+}
+
+VOID AcTamperClearInitComplete(VOID)
+{
+    g_Core.InitReadyFlag[0] = 0;
+    g_Core.InitReadyFlag[1] = 0;
+}
+
+BOOLEAN AcTamperIsInitComplete(VOID)
+{
+    ULONG64 magic = 0xD15EA5EDBADC0FFEULL ^ CoreBootCookie();
+    ULONG64 xored = g_Core.InitReadyFlag[0] ^ g_Core.InitReadyFlag[1];
+    return (xored == magic) ? TRUE : FALSE;
 }
 
 NTSTATUS AcTamperArm(VOID)

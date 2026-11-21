@@ -4,7 +4,34 @@
 ;
 ; windows x64 abi - args in rcx, rdx, r8, r9; return in rax.
 
+EXTERN g_AcImports:BYTE
+
 .CODE
+
+; ULONG64 AcResolveImportA(ULONG idx)
+;   type-a resolver tail, in asm so the xor-decode sequence lives in .text
+;   instead of being inlined into every caller's own function body. matches
+;   the vgc 1.19.2 type-a shape exactly:
+;
+;     mov  rax, qword ptr [table + idx*24 + 0]   ; encoded ptr
+;     xor  rax, qword ptr [table + idx*24 + 8]   ; per-descriptor key
+;     ret
+;
+;   rcx = idx
+;   returns the decoded api pointer in rax.
+;
+;   row stride is 24 bytes (3 qwords). we reach it with
+;   lea r11, [rcx + rcx*2]  ; r11 = idx * 3
+;   so the final mov can address [r10 + r11*8], no imul needed, and the
+;   generated code stays branch-free.
+PUBLIC AcResolveImportA
+AcResolveImportA PROC
+    lea     r10, [g_AcImports]
+    lea     r11, [rcx + rcx*2]
+    mov     rax, qword ptr [r10 + r11*8 + 0]
+    xor     rax, qword ptr [r10 + r11*8 + 8]
+    ret
+AcResolveImportA ENDP
 
 ; ULONG64 AcStackSwitchCall(PVOID target, PVOID newStackTop, PVOID a0, PVOID a1)
 ;   rcx = target        -> moved to r10 (volatile)
